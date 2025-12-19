@@ -19,14 +19,17 @@ public class LoginManagementService {
     private final LoginManagementRepository repository;
     private final ExternalApiService externalApiService;
 
-    // Status constants baseados nos seus dados
-    private static final int STATUS_ERROR = -4108;     // Erro
-    private static final int STATUS_SUCCESS = -4107;   // Sucesso
-    private static final int STATUS_QUEUE = -4106;     // Fila
+    // Status constants
+    private static final int STATUS_ERROR = -4108;
+    private static final int STATUS_SUCCESS = -4107;
+    private static final int STATUS_QUEUE = -4106;
 
-    // Management Type constants baseados nos seus dados
-    private static final int TYPE_UNBLOCK = -4105;     // Unblock
-    private static final int TYPE_BLOCK = -4104;       // Block
+    // Management Type constants
+    private static final int TYPE_UNBLOCK = -4105;
+    private static final int TYPE_BLOCK = -4104;
+
+    // Limite de caracteres para log_Alteracao_Rastro
+    private static final int LOG_MAX_LENGTH = 50;
 
     /**
      * Processa todos os itens pendentes de Login Management
@@ -38,7 +41,7 @@ public class LoginManagementService {
         List<LoginManagement> pendingItems = repository.findPendingProcessing();
 
         if (pendingItems.isEmpty()) {
-            log.info("Nenhum item pendente encontrado para processamento");
+            log.info("Nenhum item pendente encontrado");
             return;
         }
 
@@ -56,7 +59,6 @@ public class LoginManagementService {
                     errorCount++;
                 }
 
-                // Pequena pausa entre processamentos para evitar sobrecarga da API
                 Thread.sleep(500);
 
             } catch (InterruptedException e) {
@@ -65,7 +67,7 @@ public class LoginManagementService {
                 break;
             } catch (Exception e) {
                 log.error("Erro inesperado ao processar item ID {}: {}", item.getId(), e.getMessage(), e);
-                updateItemStatus(item.getId(), STATUS_ERROR, "Erro inesperado: " + e.getMessage(), null);
+                updateItemStatus(item.getId(), STATUS_ERROR, "Erro inesperado", null);
                 errorCount++;
             }
         }
@@ -81,67 +83,107 @@ public class LoginManagementService {
             log.info("Processando item ID: {} | Tipo: {} | ExternalKey: {}",
                     item.getId(), getManagementTypeDescription(item.getManagementType()), item.getExternalKey());
 
-            // Validação da ExternalKey
             if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
                 log.warn("ExternalKey vazia para item ID: {}", item.getId());
-                updateItemStatus(item.getId(), STATUS_ERROR, "ExternalKey não informada", null);
+                updateItemStatus(item.getId(), STATUS_ERROR, "ExternalKey vazia", null);
                 return false;
             }
 
             ApiResponseDto apiResponse;
 
             if (item.getManagementType() == TYPE_BLOCK) {
-                // Bloquear usuário
                 apiResponse = externalApiService.blockUser(item.getExternalKey());
 
                 if (apiResponse.isSuccess()) {
-                    updateItemStatus(item.getId(), STATUS_SUCCESS, "Usuário bloqueado com sucesso", null);
-                    log.info("Item ID: {} - Usuário bloqueado com sucesso", item.getId());
+                    updateItemStatus(item.getId(), STATUS_SUCCESS, "Bloqueio OK", null);
+                    log.info("Item ID: {} - Bloqueio realizado com sucesso", item.getId());
                     return true;
                 } else {
-                    updateItemStatus(item.getId(), STATUS_ERROR, "Erro no bloqueio: " + apiResponse.getMessage(), null);
+                    String errorMsg = extractErrorCode(apiResponse.getMessage());
+                    updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null);
                     log.error("Erro no bloqueio do item ID: {} - {}", item.getId(), apiResponse.getMessage());
                     return false;
                 }
 
             } else if (item.getManagementType() == TYPE_UNBLOCK) {
-                // Desbloquear usuário
                 apiResponse = externalApiService.unblockUser(item.getExternalKey());
 
                 if (apiResponse.isSuccess()) {
-                    // Se há uma nova senha, salva nos dados complementares
                     String newPassword = (String) apiResponse.getData();
                     String dadosComplementares = null;
 
                     if (newPassword != null && !newPassword.trim().isEmpty()) {
-                        // Pode ser um JSON simples ou apenas a senha, dependendo de como você quer armazenar
                         dadosComplementares = "{\"newPassword\":\"" + newPassword + "\"}";
-                        log.info("Item ID: {} - Usuário desbloqueado com sucesso. Nova senha: {}",
-                                item.getId(), newPassword);
+                        log.info("Item ID: {} - Desbloqueio OK. Nova senha gerada", item.getId());
                     } else {
-                        log.info("Item ID: {} - Usuário desbloqueado com sucesso", item.getId());
+                        log.info("Item ID: {} - Desbloqueio OK", item.getId());
                     }
 
-                    updateItemStatus(item.getId(), STATUS_SUCCESS, "Usuário desbloqueado com sucesso", dadosComplementares);
+                    updateItemStatus(item.getId(), STATUS_SUCCESS, "Desbloqueio OK", dadosComplementares);
                     return true;
                 } else {
-                    updateItemStatus(item.getId(), STATUS_ERROR,   apiResponse.getMessage(), null);
+                    String errorMsg = extractErrorCode(apiResponse.getMessage());
+                    updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null);
                     log.error("Erro no desbloqueio do item ID: {} - {}", item.getId(), apiResponse.getMessage());
                     return false;
                 }
 
             } else {
-                log.warn("Tipo de management desconhecido: {} para item ID: {}",
-                        item.getManagementType(), item.getId());
-                updateItemStatus(item.getId(), STATUS_ERROR, "Tipo de management desconhecido: " + item.getManagementType(), null);
+                log.warn("Tipo de management desconhecido: {} para item ID: {}", item.getManagementType(), item.getId());
+                updateItemStatus(item.getId(), STATUS_ERROR, "Tipo desconhecido", null);
                 return false;
             }
 
         } catch (Exception e) {
             log.error("Erro inesperado no processamento do item ID: {} - {}", item.getId(), e.getMessage(), e);
-            updateItemStatus(item.getId(), STATUS_ERROR, "Erro inesperado: " + e.getMessage(), null);
+            updateItemStatus(item.getId(), STATUS_ERROR, "Erro no processamento", null);
             return false;
         }
+    }
+
+    /**
+     * Extrai código de erro relevante de mensagens longas
+     */
+    private String extractErrorCode(String message) {
+        if (message == null || message.isEmpty()) {
+            return "Erro desconhecido";
+        }
+
+        if (message.contains("422")) {
+            if (message.contains("ALREADY_ACTIVE")) {
+                return "Já ativo";
+            }
+            return "Erro 422";
+        }
+
+        if (message.contains("401") || message.contains("403")) {
+            return "Erro auth";
+        }
+
+        if (message.contains("404")) {
+            return "Não encontrado";
+        }
+
+        if (message.contains("500")) {
+            return "Erro servidor";
+        }
+
+        return truncateLog(message);
+    }
+
+    /**
+     * Trunca a mensagem de log para caber no banco
+     */
+    private String truncateLog(String message) {
+        if (message == null) {
+            return "";
+        }
+
+        if (message.length() <= LOG_MAX_LENGTH) {
+            return message;
+        }
+
+        return message.substring(0, LOG_MAX_LENGTH - 3) + "...";
     }
 
     /**
@@ -149,21 +191,35 @@ public class LoginManagementService {
      */
     private void updateItemStatus(Integer itemId, Integer newStatus, String logMessage, String dadosComplementares) {
         try {
+            String truncatedLog = truncateLog(logMessage);
+
             if (dadosComplementares != null && !dadosComplementares.trim().isEmpty()) {
-                repository.updateStatusWithData(itemId, newStatus, LocalDateTime.now(), logMessage, dadosComplementares);
-                log.debug("Item ID: {} atualizado com dados complementares: {}", itemId, dadosComplementares);
+                repository.updateStatusWithData(itemId, newStatus, LocalDateTime.now(), truncatedLog, dadosComplementares);
+                log.debug("Item ID: {} atualizado com dados complementares", itemId);
             } else {
-                repository.updateStatus(itemId, newStatus, LocalDateTime.now(), logMessage);
+                repository.updateStatus(itemId, newStatus, LocalDateTime.now(), truncatedLog);
             }
 
-            log.debug("Status do item ID: {} atualizado para: {} - {}", itemId, getStatusDescription(newStatus), logMessage);
+            log.debug("Status do item ID: {} atualizado para: {} - {}", itemId, getStatusDescription(newStatus), truncatedLog);
         } catch (Exception e) {
             log.error("Erro ao atualizar status do item ID: {} - {}", itemId, e.getMessage(), e);
+
+            try {
+                String minimalLog = "Erro";
+                if (dadosComplementares != null && !dadosComplementares.trim().isEmpty()) {
+                    repository.updateStatusWithData(itemId, newStatus, LocalDateTime.now(), minimalLog, dadosComplementares);
+                } else {
+                    repository.updateStatus(itemId, newStatus, LocalDateTime.now(), minimalLog);
+                }
+                log.info("Status atualizado com mensagem mínima para item ID: {}", itemId);
+            } catch (Exception ex) {
+                log.error("Falha crítica ao atualizar item ID: {}", itemId, ex);
+            }
         }
     }
 
     /**
-     * Retorna o número de itens pendentes de processamento
+     * Retorna o número de itens pendentes
      */
     public long getPendingCount() {
         try {
@@ -174,7 +230,6 @@ public class LoginManagementService {
         }
     }
 
-    // Métodos auxiliares para logs mais legíveis
     private String getStatusDescription(Integer status) {
         switch (status) {
             case STATUS_ERROR: return "Erro(-4108)";

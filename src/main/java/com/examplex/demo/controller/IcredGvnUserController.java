@@ -11,17 +11,49 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/monitoring")
+@RequestMapping("/api/icredGvnUser")
 @RequiredArgsConstructor
 @Slf4j
-public class MonitoringController {
+public class IcredGvnUserController {
 
     private final LoginManagementService loginManagementService;
     private final AuthTokenService authTokenService;
     private final ExternalApiService externalApiService;
 
     /**
-     * Endpoint para testar a obtenção de token
+     * Processa todos os itens pendentes da fila
+     * {
+     *     "message": "Processamento executado com sucesso",
+     *     "success": true
+     * }
+     */
+    @PostMapping("/process")
+    public ResponseEntity<Map<String, Object>> processManually() {
+        try {
+            log.info("Processamento manual iniciado via API");
+            loginManagementService.processLoginManagement();
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Processamento executado com sucesso"
+            ));
+        } catch (Exception e) {
+            log.error("Erro no processamento manual: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "message", "Erro no processamento: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Testa a obtenção de token de autenticação
+     * {
+     *     "tokenPrefix": "eyJraWQiOiIzYjdmMTlhNS02NzMxLTQ0NjAtODM1MC1mYzFhNj...",
+     *     "success": true,
+     *     "tokenLength": 2283,
+     *     "message": "Token obtido com sucesso"
+     * }
      */
     @GetMapping("/test-token")
     public ResponseEntity<Map<String, Object>> testToken() {
@@ -37,7 +69,6 @@ public class MonitoringController {
             ));
         } catch (Exception e) {
             log.error("Erro ao testar token: {}", e.getMessage(), e);
-
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "message", "Erro ao obter token: " + e.getMessage()
@@ -46,7 +77,13 @@ public class MonitoringController {
     }
 
     /**
-     * Endpoint para forçar renovação do token
+     * Força a renovação do token de autenticação
+     * {
+     *     "tokenPrefix": "eyJraWQiOiIzYjdmMTlhNS02NzMxLTQ0NjAtODM1MC1mYzFhNj...",
+     *     "success": true,
+     *     "tokenLength": 2283,
+     *     "message": "Token renovado com sucesso"
+     * }
      */
     @PostMapping("/refresh-token")
     public ResponseEntity<Map<String, Object>> refreshToken() {
@@ -63,7 +100,6 @@ public class MonitoringController {
             ));
         } catch (Exception e) {
             log.error("Erro ao renovar token: {}", e.getMessage(), e);
-
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "message", "Erro ao renovar token: " + e.getMessage()
@@ -72,7 +108,24 @@ public class MonitoringController {
     }
 
     /**
-     * Endpoint para obter estatísticas detalhadas
+     * Retorna estatísticas do sistema
+     * {
+     *     "stats": {
+     *         "systemStatus": "UP_TO_DATE",
+     *         "pendingItems": 0,
+     *         "typeCodes": {
+     *             "block": -4104,
+     *             "unblock": -4105
+     *         },
+     *         "statusCodes": {
+     *             "error": -4108,
+     *             "success": -4107,
+     *             "queue": -4106
+     *         }
+     *     },
+     *     "success": true,
+     *     "message": "Estatísticas recuperadas com sucesso"
+     * }
      */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
@@ -98,7 +151,6 @@ public class MonitoringController {
             ));
         } catch (Exception e) {
             log.error("Erro ao recuperar estatísticas: {}", e.getMessage(), e);
-
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "message", "Erro ao recuperar estatísticas: " + e.getMessage()
@@ -107,66 +159,63 @@ public class MonitoringController {
     }
 
     /**
-     * Endpoint para testar API de Block (apenas para testes - use com cuidado!)
+     * Bloqueia um usuário diretamente (endpoint de teste)
+     * {
+     *     "data": "N/A",
+     *     "message": "Usuário bloqueado com sucesso",
+     *     "success": true
+     * }
      */
-    @PostMapping("/test-block/{externalKey}")
-    public ResponseEntity<Map<String, Object>> testBlock(@PathVariable String externalKey) {
+    @PostMapping("/blockUserIcred/{externalKey}")
+    public ResponseEntity<Map<String, Object>> blockUserIcred(@PathVariable String externalKey) {
         try {
-            log.warn("TESTE: Executando bloqueio para externalKey: {}", externalKey);
-
+            log.warn("TESTE: Bloqueando usuário com externalKey: {}", externalKey);
             var result = externalApiService.blockUser(externalKey);
 
             return ResponseEntity.ok(Map.of(
-                    "success", true,
-                    "message", "Teste de bloqueio executado",
-                    "apiResult", Map.of(
-                            "success", result.isSuccess(),
-                            "message", result.getMessage(),
-                            "data", result.getData()
-                    )
+                    "success", result.isSuccess(),
+                    "message", result.getMessage(),
+                    "data", result.getData() != null ? result.getData() : "N/A"
             ));
         } catch (Exception e) {
-            log.error("Erro no teste de bloqueio: {}", e.getMessage(), e);
-
+            log.error("Erro ao bloquear usuário: {}", e.getMessage(), e);
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
-                    "message", "Erro no teste de bloqueio: " + e.getMessage()
+                    "message", "Erro ao bloquear usuário: " + e.getMessage()
             ));
         }
     }
 
     /**
-     * Endpoint para testar API de Unblock (apenas para testes - use com cuidado!)
+     * Desbloqueia um usuário diretamente (endpoint de teste)
+     * {
+     *     "newPassword": "Xe2q4rOi8V2K",
+     *     "message": "Usuário desbloqueado com sucesso",
+     *     "success": true
+     * }
      */
-    @PostMapping("/test-unblock/{externalKey}")
-    public ResponseEntity<Map<String, Object>> testUnblock(@PathVariable String externalKey) {
+    @PostMapping("/unblockUserIcred/{externalKey}")
+    public ResponseEntity<Map<String, Object>> unblockUserIcred(@PathVariable String externalKey) {
         try {
-            log.warn("TESTE: Executando desbloqueio para externalKey: {}", externalKey);
-
+            log.warn("TESTE: Desbloqueando usuário com externalKey: {}", externalKey);
             var result = externalApiService.unblockUser(externalKey);
 
             return ResponseEntity.ok(Map.of(
-                    "success", true,
-                    "message", "Teste de desbloqueio executado",
-                    "apiResult", Map.of(
-                            "success", result.isSuccess(),
-                            "message", result.getMessage(),
-                            "data", result.getData(),
-                            "newPassword", result.getData()  // Destacar a senha se houver
-                    )
+                    "success", result.isSuccess(),
+                    "message", result.getMessage(),
+                    "newPassword", result.getData() != null ? result.getData() : "N/A"
             ));
         } catch (Exception e) {
-            log.error("Erro no teste de desbloqueio: {}", e.getMessage(), e);
-
+            log.error("Erro ao desbloquear usuário: {}", e.getMessage(), e);
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
-                    "message", "Erro no teste de desbloqueio: " + e.getMessage()
+                    "message", "Erro ao desbloquear usuário: " + e.getMessage()
             ));
         }
     }
 
     /**
-     * Endpoint para verificar saúde do sistema
+     * Verifica a saúde geral do sistema
      */
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> healthCheck() {
@@ -188,7 +237,7 @@ public class MonitoringController {
             // Testa a conexão com o banco
             try {
                 pendingCount = loginManagementService.getPendingCount();
-                dbHealthy = true; // Se chegou até aqui, o DB está ok
+                dbHealthy = true;
             } catch (Exception e) {
                 log.error("Erro na conexão com banco: {}", e.getMessage());
             }
@@ -208,7 +257,6 @@ public class MonitoringController {
             ));
         } catch (Exception e) {
             log.error("Erro no health check: {}", e.getMessage(), e);
-
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "health", Map.of(
