@@ -2,7 +2,8 @@ package com.examplex.demo.service;
 
 import com.examplex.demo.model.dto.ApiRequestDto;
 import com.examplex.demo.model.dto.ApiResponseDto;
-import com.examplex.demo.model.dto.ApiCreateRequestDto;
+import com.examplex.demo.model.dto.ApiCreateUserRequestDto;
+import com.examplex.demo.model.dto.ApiCreateGroupRequestDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +28,9 @@ public class ExternalApiService {
     @Value("${external-api.partner-uuid}")
     private String partnerUuid;
 
+    @Value("${external-api.user-profile-id:5}")
+    private Integer userProfileId;
+
     /**
      * Cria os headers padrão com autenticação
      */
@@ -38,6 +42,131 @@ public class ExternalApiService {
         headers.setBearerAuth(token);
 
         return headers;
+    }
+
+    /**
+     * Cria um novo grupo de vendedores
+     */
+    public ApiResponseDto createSellerGroup(String name, String partnerExternalKey) {
+        try {
+            String url = baseUrl + "/partner-management/v1/seller-groups";
+
+            ApiCreateGroupRequestDto request = new ApiCreateGroupRequestDto(
+                    name,
+                    name,  // label = name
+                    partnerExternalKey
+            );
+
+            HttpHeaders headers = createAuthHeaders();
+            HttpEntity<ApiCreateGroupRequestDto> httpEntity = new HttpEntity<>(request, headers);
+
+            log.info("Criando grupo: {} na URL: {}", name, url);
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url, HttpMethod.POST, httpEntity, Map.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                String groupUuid = (String) response.getBody().get("uuid");
+
+                log.info("Grupo criado com sucesso. UUID: {}", groupUuid);
+                return new ApiResponseDto(true, "Grupo criado com sucesso", groupUuid);
+            } else {
+                log.error("Erro ao criar grupo: Status {}", response.getStatusCode());
+                return new ApiResponseDto(false, "Erro na criação do grupo: " + response.getStatusCode(), null);
+            }
+
+        } catch (RestClientException e) {
+            log.error("Erro na chamada da API para criar grupo {}: {}", name, e.getMessage());
+
+            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
+                log.warn("Token inválido detectado, invalidando para renovação");
+                authTokenService.invalidateToken();
+            }
+
+            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        }
+    }
+
+    /**
+     * Cria um novo usuário na API externa
+     */
+    public ApiResponseDto createUser(String personCode) {
+        try {
+            String url = baseUrl + "/partner-management/v1/users";
+
+            ApiCreateUserRequestDto request = new ApiCreateUserRequestDto(
+                    personCode,
+                    userProfileId,
+                    partnerUuid
+            );
+
+            HttpHeaders headers = createAuthHeaders();
+            HttpEntity<ApiCreateUserRequestDto> httpEntity = new HttpEntity<>(request, headers);
+
+            log.info("Criando usuário com personCode: {} na URL: {}", personCode, url);
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url, HttpMethod.POST, httpEntity, Map.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                // Extrai o UUID do usuário criado
+                String userUuid = (String) response.getBody().get("uuid");
+
+                log.info("Usuário criado com sucesso. UUID: {}", userUuid);
+                return new ApiResponseDto(true, "Usuário criado com sucesso", userUuid);
+            } else {
+                log.error("Erro ao criar usuário: Status {}", response.getStatusCode());
+                return new ApiResponseDto(false, "Erro na criação: " + response.getStatusCode(), null);
+            }
+
+        } catch (RestClientException e) {
+            log.error("Erro na chamada da API para criar usuário {}: {}", personCode, e.getMessage());
+
+            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
+                log.warn("Token inválido detectado, invalidando para renovação");
+                authTokenService.invalidateToken();
+            }
+
+            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        }
+    }
+
+    /**
+     * Adiciona um usuário a um grupo
+     */
+    public ApiResponseDto addUserToGroup(String groupUuid, String userUuid) {
+        try {
+            String url = baseUrl + "/partner-management/v1/seller-groups/" + groupUuid + "/users/" + userUuid;
+
+            HttpHeaders headers = createAuthHeaders();
+            HttpEntity<Void> httpEntity = new HttpEntity<>(headers);
+
+            log.info("Adicionando usuário {} ao grupo {} na URL: {}", userUuid, groupUuid, url);
+
+            ResponseEntity<Object> response = restTemplate.exchange(
+                    url, HttpMethod.PUT, httpEntity, Object.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                log.info("Usuário {} adicionado ao grupo {} com sucesso", userUuid, groupUuid);
+                return new ApiResponseDto(true, "Usuário adicionado ao grupo com sucesso", response.getBody());
+            } else {
+                log.error("Erro ao adicionar usuário ao grupo: Status {}", response.getStatusCode());
+                return new ApiResponseDto(false, "Erro ao adicionar ao grupo: " + response.getStatusCode(), null);
+            }
+
+        } catch (RestClientException e) {
+            log.error("Erro na chamada da API para adicionar usuário ao grupo: {}", e.getMessage());
+
+            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
+                log.warn("Token inválido detectado, invalidando para renovação");
+                authTokenService.invalidateToken();
+            }
+
+            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        }
     }
 
     /**
@@ -68,7 +197,6 @@ public class ExternalApiService {
         } catch (RestClientException e) {
             log.error("Erro na chamada da API para bloquear usuário {}: {}", userExternalKey, e.getMessage());
 
-            // Se for erro de autenticação, invalida o token
             if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
                 log.warn("Token inválido detectado, invalidando para renovação");
                 authTokenService.invalidateToken();
@@ -98,7 +226,6 @@ public class ExternalApiService {
             if (response.getStatusCode().is2xxSuccessful()) {
                 log.info("Usuário {} desbloqueado com sucesso", userExternalKey);
 
-                // Extrai a nova senha da resposta se existir
                 String newPassword = null;
                 if (response.getBody() != null && response.getBody().containsKey("newPassword")) {
                     newPassword = (String) response.getBody().get("newPassword");
@@ -114,7 +241,6 @@ public class ExternalApiService {
         } catch (RestClientException e) {
             log.error("Erro na chamada da API para desbloquear usuário {}: {}", userExternalKey, e.getMessage());
 
-            // Se for erro de autenticação, invalida o token
             if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
                 log.warn("Token inválido detectado, invalidando para renovação");
                 authTokenService.invalidateToken();

@@ -22,4 +22,7 @@ public class LoginManagementGroups {
 
     @Column(name = "crm_Login_ManagementGroups_Nome")
     private String nome;
+
+    @Column(name = "crm_Login_ManagementGroups_PartnerExternalKey")
+    private String partnerExternalKey;
 }

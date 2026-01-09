@@ -22,10 +22,6 @@ public class IcredGvnUserController {
 
     /**
      * Processa todos os itens pendentes da fila
-     * {
-     *     "message": "Processamento executado com sucesso",
-     *     "success": true
-     * }
      */
     @PostMapping("/process")
     public ResponseEntity<Map<String, Object>> processManually() {
@@ -48,12 +44,6 @@ public class IcredGvnUserController {
 
     /**
      * Testa a obtenção de token de autenticação
-     * {
-     *     "tokenPrefix": "eyJraWQiOiIzYjdmMTlhNS02NzMxLTQ0NjAtODM1MC1mYzFhNj...",
-     *     "success": true,
-     *     "tokenLength": 2283,
-     *     "message": "Token obtido com sucesso"
-     * }
      */
     @GetMapping("/test-token")
     public ResponseEntity<Map<String, Object>> testToken() {
@@ -78,12 +68,6 @@ public class IcredGvnUserController {
 
     /**
      * Força a renovação do token de autenticação
-     * {
-     *     "tokenPrefix": "eyJraWQiOiIzYjdmMTlhNS02NzMxLTQ0NjAtODM1MC1mYzFhNj...",
-     *     "success": true,
-     *     "tokenLength": 2283,
-     *     "message": "Token renovado com sucesso"
-     * }
      */
     @PostMapping("/refresh-token")
     public ResponseEntity<Map<String, Object>> refreshToken() {
@@ -109,23 +93,6 @@ public class IcredGvnUserController {
 
     /**
      * Retorna estatísticas do sistema
-     * {
-     *     "stats": {
-     *         "systemStatus": "UP_TO_DATE",
-     *         "pendingItems": 0,
-     *         "typeCodes": {
-     *             "block": -4104,
-     *             "unblock": -4105
-     *         },
-     *         "statusCodes": {
-     *             "error": -4108,
-     *             "success": -4107,
-     *             "queue": -4106
-     *         }
-     *     },
-     *     "success": true,
-     *     "message": "Estatísticas recuperadas com sucesso"
-     * }
      */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
@@ -160,11 +127,6 @@ public class IcredGvnUserController {
 
     /**
      * Bloqueia um usuário diretamente (endpoint de teste)
-     * {
-     *     "data": "N/A",
-     *     "message": "Usuário bloqueado com sucesso",
-     *     "success": true
-     * }
      */
     @PostMapping("/blockUserIcred/{externalKey}")
     public ResponseEntity<Map<String, Object>> blockUserIcred(@PathVariable String externalKey) {
@@ -188,11 +150,6 @@ public class IcredGvnUserController {
 
     /**
      * Desbloqueia um usuário diretamente (endpoint de teste)
-     * {
-     *     "newPassword": "Xe2q4rOi8V2K",
-     *     "message": "Usuário desbloqueado com sucesso",
-     *     "success": true
-     * }
      */
     @PostMapping("/unblockUserIcred/{externalKey}")
     public ResponseEntity<Map<String, Object>> unblockUserIcred(@PathVariable String externalKey) {
@@ -210,6 +167,112 @@ public class IcredGvnUserController {
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "message", "Erro ao desbloquear usuário: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Cria um grupo de vendedores (endpoint de teste)
+     */
+    @PostMapping("/createSellerGroup")
+    public ResponseEntity<Map<String, Object>> createSellerGroup(@RequestBody Map<String, String> body) {
+        try {
+            String name = body.get("name");
+            String partnerExternalKey = body.get("partnerExternalKey");
+
+            if (name == null || name.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "success", false,
+                        "message", "name é obrigatório"
+                ));
+            }
+
+            if (partnerExternalKey == null || partnerExternalKey.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "success", false,
+                        "message", "partnerExternalKey é obrigatório"
+                ));
+            }
+
+            log.warn("TESTE: Criando grupo: {}", name);
+            var result = externalApiService.createSellerGroup(name, partnerExternalKey);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", result.isSuccess(),
+                    "message", result.getMessage(),
+                    "groupUuid", result.getData() != null ? result.getData() : "N/A"
+            ));
+        } catch (Exception e) {
+            log.error("Erro ao criar grupo: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "message", "Erro ao criar grupo: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Cria um usuário diretamente (endpoint de teste)
+     */
+    @PostMapping("/createUserIcred")
+    public ResponseEntity<Map<String, Object>> createUserIcred(@RequestBody Map<String, String> body) {
+        try {
+            String personCode = body.get("personCode");
+
+            if (personCode == null || personCode.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "success", false,
+                        "message", "personCode é obrigatório"
+                ));
+            }
+
+            log.warn("TESTE: Criando usuário com personCode: {}", personCode);
+            var result = externalApiService.createUser(personCode);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", result.isSuccess(),
+                    "message", result.getMessage(),
+                    "userUuid", result.getData() != null ? result.getData() : "N/A"
+            ));
+        } catch (Exception e) {
+            log.error("Erro ao criar usuário: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "message", "Erro ao criar usuário: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Adiciona um usuário a um grupo (endpoint de teste)
+     */
+    @PostMapping("/addUserToGroup")
+    public ResponseEntity<Map<String, Object>> addUserToGroup(@RequestBody Map<String, String> body) {
+        try {
+            String groupUuid = body.get("groupUuid");
+            String userUuid = body.get("userUuid");
+
+            if (groupUuid == null || groupUuid.trim().isEmpty() ||
+                    userUuid == null || userUuid.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "success", false,
+                        "message", "groupUuid e userUuid são obrigatórios"
+                ));
+            }
+
+            log.warn("TESTE: Adicionando usuário {} ao grupo {}", userUuid, groupUuid);
+            var result = externalApiService.addUserToGroup(groupUuid, userUuid);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", result.isSuccess(),
+                    "message", result.getMessage(),
+                    "data", result.getData() != null ? result.getData() : "N/A"
+            ));
+        } catch (Exception e) {
+            log.error("Erro ao adicionar usuário ao grupo: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "message", "Erro ao adicionar usuário ao grupo: " + e.getMessage()
             ));
         }
     }
