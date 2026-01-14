@@ -111,7 +111,9 @@ public class IcredGvnUserController {
                             ),
                             "typeCodes", Map.of(
                                     "block", -4104,
-                                    "unblock", -4105
+                                    "unblock", -4105,
+                                    "create", 3833,
+                                    "reset", 2268
                             )
                     ),
                     "message", "Estatísticas recuperadas com sucesso"

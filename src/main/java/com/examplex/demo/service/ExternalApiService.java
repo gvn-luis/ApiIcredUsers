@@ -230,6 +230,10 @@ public class ExternalApiService {
                 if (response.getBody() != null && response.getBody().containsKey("newPassword")) {
                     newPassword = (String) response.getBody().get("newPassword");
                     log.info("Nova senha gerada para usuário {}", userExternalKey);
+                } else {
+                    // Se não gerou senha, retorna mensagem padrão
+                    newPassword = "Usuário ativo. Clicar em esqueci minha senha.";
+                    log.info("Usuário {} desbloqueado sem geração de senha", userExternalKey);
                 }
 
                 return new ApiResponseDto(true, "Usuário desbloqueado com sucesso", newPassword);

@@ -49,6 +49,22 @@ public interface LoginManagementRepository extends JpaRepository<LoginManagement
                               @Param("dadosComplementares") String dadosComplementares);
 
     /**
+     * Atualiza o status, dados complementares E externalKey (usado no CREATE)
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE LoginManagement lm SET lm.managementStatus = :newStatus, " +
+            "lm.dataAlteracao = :dataAlteracao, lm.logAlteracaoRastro = :logRastro, " +
+            "lm.dadosComplementares = :dadosComplementares, lm.externalKey = :externalKey " +
+            "WHERE lm.id = :id")
+    void updateStatusWithDataAndExternalKey(@Param("id") Integer id,
+                                            @Param("newStatus") Integer newStatus,
+                                            @Param("dataAlteracao") LocalDateTime dataAlteracao,
+                                            @Param("logRastro") String logRastro,
+                                            @Param("dadosComplementares") String dadosComplementares,
+                                            @Param("externalKey") String externalKey);
+
+    /**
      * Conta o número de itens pendentes
      */
     @Query("SELECT COUNT(lm) FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4108) AND lm.registroExcluido = false")
