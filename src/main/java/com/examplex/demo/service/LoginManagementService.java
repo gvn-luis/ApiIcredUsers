@@ -349,18 +349,62 @@ public class LoginManagementService {
      */
     private String addPasswordToDados(String currentDados, String newPassword) {
         try {
-            // Remove a última chave } para adicionar a senha
-            if (currentDados.endsWith("}")) {
-                String base = currentDados.substring(0, currentDados.length() - 1);
+            if (currentDados == null || currentDados.trim().isEmpty()) {
+                // Se não tem dados, cria um JSON novo
                 if (newPassword != null && !newPassword.trim().isEmpty()) {
-                    return base + ",\"newPassword\":\"" + newPassword + "\"}";
+                    return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
                 }
+                return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
             }
+
+            // Remove espaços e valida se é um JSON válido
+            String dados = currentDados.trim();
+
+            // Se termina com }, remove para adicionar a senha
+            if (dados.endsWith("}")) {
+                String base = dados.substring(0, dados.length() - 1);
+
+                // Se o JSON está vazio {}, não precisa de vírgula
+                if (base.trim().equals("{")) {
+                    if (newPassword != null && !newPassword.trim().isEmpty()) {
+                        return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
+                    }
+                    return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
+                }
+
+                // Adiciona vírgula e a senha
+                if (newPassword != null && !newPassword.trim().isEmpty()) {
+                    return base + ",\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
+                }
+                return base + ",\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
+            }
+
+            // Se não termina com }, retorna o original (JSON inválido)
+            log.warn("JSON de dadosComplementares inválido: {}", currentDados);
             return currentDados;
+
         } catch (Exception e) {
-            log.warn("Erro ao adicionar senha ao JSON: {}", e.getMessage());
-            return currentDados;
+            log.error("Erro ao adicionar senha ao JSON: {}", e.getMessage(), e);
+            // Em caso de erro, retorna um JSON válido com a senha
+            if (newPassword != null && !newPassword.trim().isEmpty()) {
+                return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
+            }
+            return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
         }
+    }
+
+    /**
+     * Escapa caracteres especiais para JSON
+     */
+    private String escapeJson(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
     }
 
     /**
@@ -574,6 +618,23 @@ public class LoginManagementService {
         }
 
         return message.substring(0, LOG_MAX_LENGTH - 3) + "...";
+    }
+
+    /**
+     * Valida se o JSON está bem formatado
+     */
+    private boolean isValidJson(String json) {
+        if (json == null || json.trim().isEmpty()) {
+            return false;
+        }
+
+        try {
+            objectMapper.readTree(json);
+            return true;
+        } catch (Exception e) {
+            log.warn("JSON inválido: {} - Erro: {}", json, e.getMessage());
+            return false;
+        }
     }
 
     /**
