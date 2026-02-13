@@ -1,5 +1,6 @@
 package com.examplex.demo.service;
 
+import com.examplex.demo.exception.ExternalApiException;
 import com.examplex.demo.model.LoginManagement;
 import com.examplex.demo.model.LoginManagementGroups;
 import com.examplex.demo.model.dto.ApiResponseDto;
@@ -11,6 +12,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
@@ -30,37 +32,41 @@ public class LoginManagementService {
     private String partnerUuid;
 
     // Status constants
-    private static final int STATUS_ERROR = -4108;
     private static final int STATUS_SUCCESS = -4107;
-    private static final int STATUS_QUEUE = -4106;
+    private static final int STATUS_PENDING = -4109;
 
     // Management Type constants
     private static final int TYPE_UNBLOCK = -4105;
     private static final int TYPE_BLOCK = -4104;
     private static final int TYPE_CREATE = 3833;
-    private static final int TYPE_RESET = 2268;  // Reset de senha (Block + Unblock)
+    private static final int TYPE_RESET = 2268;
+    private static final int TYPE_LINK_GROUP = 4480;
+    private static final int TYPE_BANNED = 5050;
 
-    // Limite de caracteres para log_Alteracao_Rastro
     private static final int LOG_MAX_LENGTH = 50;
 
     /**
-     * Processa todos os itens pendentes de Login Management
+     * Processa todos os itens pendentes
+     * NÃO tem @Transactional para evitar rollback de toda a transação
      */
-    @Transactional
     public void processLoginManagement() {
-        log.info("Iniciando processamento de Login Management");
+        log.info("========================================");
+        log.info("INICIANDO PROCESSAMENTO");
+        log.info("========================================");
 
         List<LoginManagement> pendingItems = repository.findPendingProcessing();
 
         if (pendingItems.isEmpty()) {
-            log.info("Nenhum item pendente encontrado");
+            log.info("Nenhum item na fila");
+            log.info("========================================");
             return;
         }
 
-        log.info("Encontrados {} itens para processamento", pendingItems.size());
+        log.info("Total na fila: {}", pendingItems.size());
+        log.info("========================================");
 
         int successCount = 0;
-        int errorCount = 0;
+        int pendingCount = 0;
 
         for (LoginManagement item : pendingItems) {
             try {
@@ -68,348 +74,471 @@ public class LoginManagementService {
                 if (success) {
                     successCount++;
                 } else {
-                    errorCount++;
+                    pendingCount++;
                 }
-
                 Thread.sleep(500);
-
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 log.error("Processamento interrompido");
                 break;
             } catch (Exception e) {
-                log.error("Erro inesperado ao processar item ID {}: {}", item.getId(), e.getMessage(), e);
-                updateItemStatus(item.getId(), STATUS_ERROR, "Erro inesperado", null, null);
-                errorCount++;
+                log.error("❌ ERRO CRÍTICO no item ID {}: {}", item.getId(), e.getMessage(), e);
+                updateItemStatus(item.getId(), STATUS_PENDING, "Erro crítico", null, null);
+                pendingCount++;
             }
         }
 
-        log.info("Processamento finalizado. Sucessos: {}, Erros: {}", successCount, errorCount);
+        log.info("========================================");
+        log.info("PROCESSAMENTO FINALIZADO");
+        log.info("✅ Sucessos: {} | ⏳ Pendências: {}", successCount, pendingCount);
+        log.info("========================================");
     }
 
     /**
      * Processa um item individual
      */
     private boolean processItem(LoginManagement item) {
-        try {
-            log.info("Processando item ID: {} | Tipo: {} | UserCode: {}",
-                    item.getId(), getManagementTypeDescription(item.getManagementType()), item.getUserCode());
+        log.info("📋 USUÁRIO: {} | Tipo: {} | ID: {}",
+                item.getUserCode(),
+                getManagementTypeDescription(item.getManagementType()),
+                item.getId());
 
-            // ========== CREATE ==========
-            if (item.getManagementType() == TYPE_CREATE) {
+        switch (item.getManagementType()) {
+            case TYPE_CREATE:
                 return processCreateUser(item);
-            }
-            // ========== RESET ==========
-            else if (item.getManagementType() == TYPE_RESET) {
+            case TYPE_RESET:
                 return processResetPassword(item);
-            }
-            // ========== BLOCK ==========
-            else if (item.getManagementType() == TYPE_BLOCK) {
+            case TYPE_BLOCK:
                 return processBlockUser(item);
-            }
-            // ========== UNBLOCK ==========
-            else if (item.getManagementType() == TYPE_UNBLOCK) {
+            case TYPE_UNBLOCK:
                 return processUnblockUser(item);
+            case TYPE_LINK_GROUP:
+                return processLinkToGroup(item);
+            default:
+                log.warn("⚠️  Tipo desconhecido: {}", item.getManagementType());
+                updateItemStatus(item.getId(), STATUS_PENDING, "Tipo desconhecido", null, null);
+                return false;
+        }
+    }
+
+    /**
+     * TYPE -4105: UNBLOCK
+     */
+    private boolean processUnblockUser(LoginManagement item) {
+        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
+            log.warn("⚠️  ExternalKey vazia");
+            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            return false;
+        }
+
+        log.info("🔓 Solicitando UNBLOCK...");
+
+        ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
+
+        // ✅ Caso 1: UNBLOCK funcionou
+        if (unblockResponse.isSuccess()) {
+            String newPassword = extractPassword(unblockResponse);
+            String dadosComplementares = buildPasswordJson(newPassword);
+
+            log.info("✅ UNBLOCK concluído - Senha: {}", maskPassword(newPassword));
+            updateItemStatus(item.getId(), STATUS_SUCCESS, "Desbloqueio OK", dadosComplementares, null);
+            return true;
+        }
+
+        // ⚠️ Caso 2: Usuário JÁ ESTÁ ATIVO → Fazer RESET
+        if (unblockResponse.getMessage() != null &&
+                unblockResponse.getMessage().toLowerCase().contains("já está ativo")) {
+
+            log.warn("⚠️  Usuário já ativo. Executando RESET para gerar nova senha...");
+            return executeReset(item, "RESET (já ativo)");
+        }
+
+        // ❌ Caso 3: Outro erro
+        log.error("❌ Falha no UNBLOCK: {}", unblockResponse.getMessage());
+        updateItemStatus(item.getId(), STATUS_PENDING,
+                truncateLog(unblockResponse.getMessage()), null, null);
+        return false;
+    }
+
+    /**
+     * TYPE 2268: RESET
+     */
+    private boolean processResetPassword(LoginManagement item) {
+        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
+            log.warn("⚠️  ExternalKey vazia");
+            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            return false;
+        }
+
+        log.info("🔑 Solicitando RESET DE SENHA...");
+        return executeReset(item, "Reset OK");
+    }
+
+    /**
+     * Executa RESET (Block + Unblock)
+     */
+    private boolean executeReset(LoginManagement item, String successMessage) {
+        try {
+            // Passo 1: Tentar BLOQUEAR
+            log.info("   → Bloqueando usuário...");
+            ApiResponseDto blockResponse = externalApiService.blockUser(item.getExternalKey());
+
+            // ⚠️ Caso especial: Usuário não relacionado ao corban
+            if (!blockResponse.isSuccess() && blockResponse.getMessage() != null) {
+                String msg = blockResponse.getMessage().toLowerCase();
+
+                if (msg.contains("user_not_related_to_partner") ||
+                        msg.contains("não relacionado ao corban") ||
+                        msg.contains("nao relacionado ao corban")) {
+
+                    log.warn("⚠️  Usuário não vinculado ao corban. Executando apenas UNBLOCK...");
+                    return executeOnlyUnblock(item, "UNBLOCK (vincular)");
+                }
             }
-            // ========== TIPO DESCONHECIDO ==========
-            else {
-                log.warn("Tipo de management desconhecido: {} para item ID: {}", item.getManagementType(), item.getId());
-                updateItemStatus(item.getId(), STATUS_ERROR, "Tipo desconhecido", null, null);
+
+            if (!blockResponse.isSuccess()) {
+                log.error("❌ Falha ao bloquear: {}", blockResponse.getMessage());
+                updateItemStatus(item.getId(), STATUS_PENDING,
+                        "Erro block: " + truncateLog(blockResponse.getMessage()), null, null);
                 return false;
             }
 
-        } catch (Exception e) {
-            log.error("Erro inesperado no processamento do item ID: {} - {}", item.getId(), e.getMessage(), e);
-            updateItemStatus(item.getId(), STATUS_ERROR, "Erro no processamento", null, null);
-            return false;
-        }
-    }
-
-    /**
-     * Processa criação de usuário (com análise de grupo)
-     */
-    private boolean processCreateUser(LoginManagement item) {
-        // Validação do UserCode
-        if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
-            log.warn("UserCode vazio para item ID: {}", item.getId());
-            updateItemStatus(item.getId(), STATUS_ERROR, "UserCode vazio", null, null);
-            return false;
-        }
-
-        // Parse do JSON de dadosComplementares
-        DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
-
-        if (dados == null) {
-            log.warn("Item ID: {} - dadosComplementares inválido ou vazio", item.getId());
-            // Se não tem dados complementares, cria usuário sem grupo
-            return createUserOnly(item);
-        }
-
-        String groupUuid = dados.getManagementGroupsUuid();
-        String groupNome = dados.getManagementGroupsNome();
-
-        // Cenário 1: Tem UUID do grupo - vincular a grupo existente
-        if (groupUuid != null && !groupUuid.trim().isEmpty()) {
-            log.info("Item ID: {} - Criar usuário e vincular ao grupo UUID: {}", item.getId(), groupUuid);
-            return createUserAndLinkToExistingGroup(item, groupUuid, groupNome);
-        }
-
-        // Cenário 2: Tem nome mas não tem UUID - criar novo grupo
-        if (groupNome != null && !groupNome.trim().isEmpty()) {
-            log.info("Item ID: {} - Criar usuário e criar novo grupo: {}", item.getId(), groupNome);
-            return createUserAndCreateNewGroup(item, groupNome);
-        }
-
-        // Cenário 3: Não tem nem nome nem UUID - apenas criar usuário
-        log.info("Item ID: {} - Criar usuário sem grupo", item.getId());
-        return createUserOnly(item);
-    }
-
-    /**
-     * Cenário 1: Criar usuário e vincular a grupo existente
-     */
-    private boolean createUserAndLinkToExistingGroup(LoginManagement item, String groupUuid, String groupNome) {
-        // Passo 1: Criar usuário
-        ApiResponseDto createResponse = externalApiService.createUser(item.getUserCode());
-
-        if (!createResponse.isSuccess()) {
-            String errorMsg = extractErrorCode(createResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null, null);
-            log.error("Erro ao criar usuário do item ID: {} - {}", item.getId(), createResponse.getMessage());
-            return false;
-        }
-
-        String userUuid = (String) createResponse.getData();
-        log.info("Item ID: {} - Usuário criado com UUID: {}", item.getId(), userUuid);
-
-        // Passo 2: Vincular ao grupo existente
-        ApiResponseDto groupResponse = externalApiService.addUserToGroup(groupUuid, userUuid);
-
-        if (!groupResponse.isSuccess()) {
-            log.warn("Item ID: {} - Usuário criado mas falhou ao vincular ao grupo: {}",
-                    item.getId(), groupResponse.getMessage());
-            String dados = buildDadosJson(userUuid, null, null, "Erro ao vincular");
-            updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado sem grupo", dados, userUuid);
-            return executeBlockAndUnblock(item.getId(), userUuid);
-        }
-
-        log.info("Item ID: {} - Usuário vinculado ao grupo com sucesso", item.getId());
-        String dados = buildDadosJson(userUuid, groupUuid, groupNome, null);
-        updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado com grupo", dados, userUuid);
-
-        // Passo 3: Executar BLOCK e UNBLOCK
-        return executeBlockAndUnblock(item.getId(), userUuid);
-    }
-
-    /**
-     * Cenário 2: Criar usuário e criar novo grupo
-     */
-    private boolean createUserAndCreateNewGroup(LoginManagement item, String groupNome) {
-        // Passo 1: Criar usuário
-        ApiResponseDto createResponse = externalApiService.createUser(item.getUserCode());
-
-        if (!createResponse.isSuccess()) {
-            String errorMsg = extractErrorCode(createResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null, null);
-            log.error("Erro ao criar usuário do item ID: {} - {}", item.getId(), createResponse.getMessage());
-            return false;
-        }
-
-        String userUuid = (String) createResponse.getData();
-        log.info("Item ID: {} - Usuário criado com UUID: {}", item.getId(), userUuid);
-
-        // Passo 2: Criar novo grupo
-        String partnerExternalKey = item.getUserCode();
-        ApiResponseDto createGroupResponse = externalApiService.createSellerGroup(groupNome, partnerExternalKey);
-
-        if (!createGroupResponse.isSuccess()) {
-            log.warn("Item ID: {} - Usuário criado mas falhou ao criar grupo: {}",
-                    item.getId(), createGroupResponse.getMessage());
-            String dados = buildDadosJson(userUuid, null, null, "Erro ao criar grupo");
-            updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado sem grupo", dados, userUuid);
-            return executeBlockAndUnblock(item.getId(), userUuid);
-        }
-
-        String newGroupUuid = (String) createGroupResponse.getData();
-        log.info("Item ID: {} - Grupo criado com UUID: {}", item.getId(), newGroupUuid);
-
-        // Passo 3: Salvar grupo no banco
-        try {
-            LoginManagementGroups newGroup = new LoginManagementGroups();
-            newGroup.setUuid(newGroupUuid);
-            newGroup.setNome(groupNome);
-            newGroup.setPartnerExternalKey(partnerExternalKey);
-            groupsRepository.save(newGroup);
-            log.info("Item ID: {} - Grupo salvo no banco com ID: {}", item.getId(), newGroup.getId());
-        } catch (Exception e) {
-            log.error("Item ID: {} - Erro ao salvar grupo no banco: {}", item.getId(), e.getMessage());
-        }
-
-        // Passo 4: Vincular usuário ao grupo recém-criado
-        ApiResponseDto linkResponse = externalApiService.addUserToGroup(newGroupUuid, userUuid);
-
-        if (!linkResponse.isSuccess()) {
-            log.warn("Item ID: {} - Grupo criado mas falhou ao vincular usuário: {}",
-                    item.getId(), linkResponse.getMessage());
-            String dados = buildDadosJson(userUuid, newGroupUuid, groupNome, "Grupo criado mas não vinculado");
-            updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado sem vínculo", dados, userUuid);
-            return executeBlockAndUnblock(item.getId(), userUuid);
-        }
-
-        log.info("Item ID: {} - Usuário vinculado ao novo grupo com sucesso", item.getId());
-        String dados = buildDadosJson(userUuid, newGroupUuid, groupNome, null);
-        updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado com novo grupo", dados, userUuid);
-
-        // Passo 5: Executar BLOCK e UNBLOCK
-        return executeBlockAndUnblock(item.getId(), userUuid);
-    }
-
-    /**
-     * Cenário 3: Criar apenas usuário (sem grupo)
-     */
-    private boolean createUserOnly(LoginManagement item) {
-        ApiResponseDto createResponse = externalApiService.createUser(item.getUserCode());
-
-        if (!createResponse.isSuccess()) {
-            String errorMsg = extractErrorCode(createResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null, null);
-            log.error("Erro ao criar usuário do item ID: {} - {}", item.getId(), createResponse.getMessage());
-            return false;
-        }
-
-        String userUuid = (String) createResponse.getData();
-        log.info("Item ID: {} - Usuário criado com sucesso (sem grupo)", item.getId());
-
-        String dados = buildDadosJson(userUuid, null, null, null);
-        updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS, "Criado OK", dados, userUuid);
-
-        // Executar BLOCK e UNBLOCK
-        return executeBlockAndUnblock(item.getId(), userUuid);
-    }
-
-    /**
-     * Executa BLOCK seguido de UNBLOCK após criar usuário
-     */
-    private boolean executeBlockAndUnblock(Integer itemId, String userUuid) {
-        try {
-            log.info("Item ID: {} - Iniciando BLOCK do usuário {}", itemId, userUuid);
-
-            // Passo 1: BLOQUEAR usuário
-            ApiResponseDto blockResponse = externalApiService.blockUser(userUuid);
-
-            if (!blockResponse.isSuccess()) {
-                log.error("Item ID: {} - Falha ao bloquear usuário: {}", itemId, blockResponse.getMessage());
-                // Não consideramos falha crítica - usuário já foi criado
-                return true;
-            }
-
-            log.info("Item ID: {} - Usuário bloqueado com sucesso", itemId);
-
-            // Pequena pausa entre block e unblock
+            log.info("   ✅ Bloqueado");
             Thread.sleep(500);
 
-            // Passo 2: DESBLOQUEAR usuário
-            log.info("Item ID: {} - Iniciando UNBLOCK do usuário {}", itemId, userUuid);
-            ApiResponseDto unblockResponse = externalApiService.unblockUser(userUuid);
+            // Passo 2: DESBLOQUEAR
+            log.info("   → Desbloqueando usuário...");
+            ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
 
             if (!unblockResponse.isSuccess()) {
-                log.error("Item ID: {} - Falha ao desbloquear usuário: {}", itemId, unblockResponse.getMessage());
-                // Não consideramos falha crítica - usuário já foi criado
-                return true;
+                log.error("❌ Falha ao desbloquear: {}", unblockResponse.getMessage());
+                updateItemStatus(item.getId(), STATUS_PENDING,
+                        "Erro unblock: " + truncateLog(unblockResponse.getMessage()), null, null);
+                return false;
             }
 
-            // Atualizar dadosComplementares com a senha (ou mensagem padrão)
-            String newPassword = (String) unblockResponse.getData();
-            log.info("Item ID: {} - Usuário desbloqueado. Senha: {}", itemId,
-                    newPassword != null ? "[SENHA GERADA]" : "[SEM SENHA]");
+            String newPassword = extractPassword(unblockResponse);
+            String dadosComplementares = buildPasswordJson(newPassword);
 
-            // Buscar item novamente para pegar dados atuais
-            LoginManagement currentItem = repository.findById(itemId).orElse(null);
-            if (currentItem != null && currentItem.getDadosComplementares() != null) {
-                // Adiciona a senha aos dados complementares existentes
-                String updatedDados = addPasswordToDados(currentItem.getDadosComplementares(), newPassword);
-                updateItemStatus(itemId, STATUS_SUCCESS, "Criado e ativado", updatedDados, null);
-            }
+            log.info("   ✅ Desbloqueado - Senha: {}", maskPassword(newPassword));
+            log.info("✅ RESET concluído");
 
-            log.info("Item ID: {} - Fluxo CREATE completo: Criar -> Block -> Unblock", itemId);
+            updateItemStatus(item.getId(), STATUS_SUCCESS, successMessage, dadosComplementares, null);
             return true;
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("Item ID: {} - Processamento interrompido durante Block/Unblock", itemId);
-            return true; // Usuário já foi criado
+            log.error("❌ Processamento interrompido");
+            updateItemStatus(item.getId(), STATUS_PENDING, "Interrompido", null, null);
+            return false;
         } catch (Exception e) {
-            log.error("Item ID: {} - Erro durante Block/Unblock: {}", itemId, e.getMessage(), e);
-            return true; // Usuário já foi criado
+            log.error("❌ Erro durante RESET: {}", e.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING, "Erro no reset", null, null);
+            return false;
         }
     }
 
     /**
-     * Adiciona a senha ao JSON de dadosComplementares
+     * Executa apenas UNBLOCK (sem BLOCK antes)
      */
-    private String addPasswordToDados(String currentDados, String newPassword) {
+    private boolean executeOnlyUnblock(LoginManagement item, String successMessage) {
+        log.info("🔓 Executando UNBLOCK (vincular ao corban)...");
+
+        ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
+
+        if (!unblockResponse.isSuccess()) {
+            log.error("❌ Falha ao ativar usuário: {}", unblockResponse.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING,
+                    truncateLog(unblockResponse.getMessage()), null, null);
+            return false;
+        }
+
+        String newPassword = extractPassword(unblockResponse);
+        String dadosComplementares = buildPasswordJson(newPassword);
+
+        log.info("✅ Usuário ativado e vinculado ao corban - Senha: {}", maskPassword(newPassword));
+        updateItemStatus(item.getId(), STATUS_SUCCESS, successMessage, dadosComplementares, null);
+        return true;
+    }
+
+    /**
+     * TYPE -4104: BLOCK
+     */
+    private boolean processBlockUser(LoginManagement item) {
+        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
+            log.warn("⚠️  ExternalKey vazia");
+            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            return false;
+        }
+
+        log.info("🔒 Solicitando BLOCK...");
+
+        ApiResponseDto response = externalApiService.blockUser(item.getExternalKey());
+
+        if (response.isSuccess()) {
+            log.info("✅ BLOCK concluído");
+            updateItemStatus(item.getId(), STATUS_SUCCESS, "Bloqueio OK", null, null);
+            return true;
+        } else {
+            log.error("❌ Falha: {}", response.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING, truncateLog(response.getMessage()), null, null);
+            return false;
+        }
+    }
+
+    /**
+     * TYPE 4480: LINK_GROUP
+     * ✅ ATUALIZADO: Agora usa personCode ao invés de userUuid
+     */
+    private boolean processLinkToGroup(LoginManagement item) {
+        log.info("🔗 VINCULAR USUÁRIO A GRUPO");
+
+        // ✅ MUDANÇA: Agora precisa de userCode (CPF) ao invés de externalKey (UUID)
+        if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
+            log.warn("⚠️  UserCode (CPF) vazio");
+            updateItemStatus(item.getId(), STATUS_PENDING, "UserCode vazio", null, null);
+            return false;
+        }
+
+        DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
+        if (dados == null || dados.getManagementGroupsUuid() == null) {
+            log.warn("⚠️  UUID do grupo não informado");
+            updateItemStatus(item.getId(), STATUS_PENDING, "UUID grupo vazio", null, null);
+            return false;
+        }
+
+        String groupUuid = dados.getManagementGroupsUuid();
+        log.info("   → PersonCode (CPF): {}", item.getUserCode());
+        log.info("   → GroupUUID: {}", groupUuid);
+
+        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de userUuid
+        ApiResponseDto response = externalApiService.addUserToGroup(groupUuid, item.getUserCode());
+
+        if (response.isSuccess()) {
+            log.info("✅ Usuário vinculado ao grupo com sucesso!");
+            updateItemStatus(item.getId(), STATUS_SUCCESS, "Vinculado OK", null, null);
+            return true;
+        } else {
+            log.error("❌ Falha ao vincular: {}", response.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING,
+                    "Erro: " + truncateLog(response.getMessage()), null, null);
+            return false;
+        }
+    }
+
+    /**
+     * TYPE 3833: CREATE
+     */
+    private boolean processCreateUser(LoginManagement item) {
+        if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
+            log.warn("⚠️  UserCode vazio");
+            updateItemStatus(item.getId(), STATUS_PENDING, "UserCode vazio", null, null);
+            return false;
+        }
+
+        log.info("👤 CRIAR USUÁRIO");
+
         try {
-            if (currentDados == null || currentDados.trim().isEmpty()) {
-                // Se não tem dados, cria um JSON novo
-                if (newPassword != null && !newPassword.trim().isEmpty()) {
-                    return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
-                }
-                return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
+            // Tenta criar usuário
+            ApiResponseDto createResponse = externalApiService.createUser(item.getUserCode());
+
+            if (!createResponse.isSuccess()) {
+                log.error("❌ Falha ao criar usuário: {}", createResponse.getMessage());
+                updateItemStatus(item.getId(), STATUS_PENDING,
+                        truncateLog(createResponse.getMessage()), null, null);
+                return false;
             }
 
-            // Remove espaços e valida se é um JSON válido
-            String dados = currentDados.trim();
+            String userUuid = (String) createResponse.getData();
+            log.info("✅ Usuário criado - UUID: {}", userUuid);
 
-            // Se termina com }, remove para adicionar a senha
-            if (dados.endsWith("}")) {
-                String base = dados.substring(0, dados.length() - 1);
+            // Analisa dados complementares para grupo
+            DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
 
-                // Se o JSON está vazio {}, não precisa de vírgula
-                if (base.trim().equals("{")) {
-                    if (newPassword != null && !newPassword.trim().isEmpty()) {
-                        return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
-                    }
-                    return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
-                }
-
-                // Adiciona vírgula e a senha
-                if (newPassword != null && !newPassword.trim().isEmpty()) {
-                    return base + ",\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
-                }
-                return base + ",\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
+            if (dados != null && dados.getManagementGroupsUuid() != null) {
+                // Vincular a grupo existente
+                linkUserToGroup(item, dados.getManagementGroupsUuid());
+            } else if (dados != null && dados.getManagementGroupsNome() != null) {
+                // Criar novo grupo e vincular
+                createGroupAndLink(item, dados.getManagementGroupsNome());
             }
 
-            // Se não termina com }, retorna o original (JSON inválido)
-            log.warn("JSON de dadosComplementares inválido: {}", currentDados);
-            return currentDados;
+            // Block + Unblock para gerar senha
+            executeBlockAndUnblock(item.getId(), userUuid);
+
+            updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS,
+                    "Criado OK", null, userUuid);
+            return true;
+
+        } catch (ExternalApiException e) {
+            // Usuário BANIDO
+            if (e.isBannedUser()) {
+                log.warn("🚫 Usuário BANIDO: {} - {}", item.getUserCode(), e.getMessage());
+                updateItemAsBanned(item.getId(), e.getMessage());
+                return true;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Vincula usuário a grupo existente
+     * ✅ ATUALIZADO: Agora usa personCode (CPF) ao invés de userUuid
+     */
+    private void linkUserToGroup(LoginManagement item, String groupUuid) {
+        log.info("🔗 Vinculando ao grupo: {}", groupUuid);
+
+        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de userUuid
+        ApiResponseDto response = externalApiService.addUserToGroup(groupUuid, item.getUserCode());
+
+        if (response.isSuccess()) {
+            log.info("✅ Vinculado ao grupo");
+        } else {
+            log.warn("⚠️  Falha ao vincular ao grupo: {}", response.getMessage());
+        }
+    }
+
+    /**
+     * Cria novo grupo e vincula usuário
+     * ✅ ATUALIZADO: Agora usa personCode ao criar grupo e vincular
+     */
+    private void createGroupAndLink(LoginManagement item, String groupNome) {
+        log.info("📁 Criando novo grupo: {}", groupNome);
+
+        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de partnerExternalKey
+        ApiResponseDto groupResponse = externalApiService.createSellerGroup(
+                groupNome,
+                item.getUserCode()  // personCode (CPF)
+        );
+
+        if (groupResponse.isSuccess()) {
+            String groupUuid = (String) groupResponse.getData();
+            log.info("✅ Grupo criado - UUID: {}", groupUuid);
+
+            // Salvar no banco
+            saveGroupToDatabase(groupUuid, groupNome, item.getUserCode());
+
+            // Vincular usuário
+            linkUserToGroup(item, groupUuid);
+        } else {
+            log.warn("⚠️  Falha ao criar grupo: {}", groupResponse.getMessage());
+        }
+    }
+
+    /**
+     * Salva grupo no banco de dados
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    private void saveGroupToDatabase(String uuid, String nome, String partnerKey) {
+        try {
+            LoginManagementGroups group = new LoginManagementGroups();
+            group.setUuid(uuid);
+            group.setNome(nome);
+            group.setPartnerExternalKey(partnerKey);
+            groupsRepository.save(group);
+            log.info("✅ Grupo salvo no banco");
+        } catch (Exception e) {
+            log.error("❌ Erro ao salvar grupo: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Executa Block + Unblock para gerar senha inicial
+     */
+    private void executeBlockAndUnblock(Integer itemId, String userUuid) {
+        try {
+            log.info("🔐 Executando Block + Unblock...");
+
+            // Block
+            externalApiService.blockUser(userUuid);
+            Thread.sleep(500);
+
+            // Unblock
+            ApiResponseDto unblockResponse = externalApiService.unblockUser(userUuid);
+
+            if (unblockResponse.isSuccess()) {
+                String password = extractPassword(unblockResponse);
+                log.info("✅ Senha gerada: {}", maskPassword(password));
+
+                LoginManagement current = repository.findById(itemId).orElse(null);
+                if (current != null) {
+                    String updatedDados = addPasswordToDados(
+                            current.getDadosComplementares(), password
+                    );
+                    updateItemStatus(itemId, STATUS_SUCCESS, "Criado e ativado", updatedDados, null);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("⚠️  Erro em Block/Unblock (não crítico): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Marca item como usuário banido
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    private void updateItemAsBanned(Integer itemId, String message) {
+        try {
+            String dadosComplementares = "{\"banned\":true,\"message\":\"" + escapeJson(message) + "\"}";
+
+            LoginManagement item = repository.findById(itemId).orElse(null);
+            if (item == null) {
+                log.error("❌ Item {} não encontrado para marcar como BANNED", itemId);
+                return;
+            }
+
+            item.setManagementStatus(STATUS_SUCCESS);
+            item.setManagementType(TYPE_BANNED);
+            item.setLogAlteracaoRastro("Usuário banido");
+            item.setDadosComplementares(dadosComplementares);
+            item.setDataAlteracao(LocalDateTime.now());
+
+            repository.save(item);
+
+            log.info("✅ Item {} marcado como BANNED (Type=5050, Status=-4107)", itemId);
 
         } catch (Exception e) {
-            log.error("Erro ao adicionar senha ao JSON: {}", e.getMessage(), e);
-            // Em caso de erro, retorna um JSON válido com a senha
-            if (newPassword != null && !newPassword.trim().isEmpty()) {
-                return "{\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
+            log.error("❌ Erro ao atualizar item {} como BANNED: {}", itemId, e.getMessage());
+        }
+    }
+
+    // ========== MÉTODOS AUXILIARES ==========
+
+    private String extractPassword(ApiResponseDto response) {
+        if (response.getData() != null && response.getData().toString().length() > 0) {
+            return response.getData().toString();
+        }
+        return "Usuário ativo. Clicar em esqueci minha senha.";
+    }
+
+    private String buildPasswordJson(String password) {
+        return "{\"newPassword\":\"" + escapeJson(password) + "\"}";
+    }
+
+    private String maskPassword(String password) {
+        if (password == null || password.length() < 4) {
+            return "[SENHA]";
+        }
+        return password.substring(0, 2) + "****" + password.substring(password.length() - 2);
+    }
+
+    private String addPasswordToDados(String currentDados, String newPassword) {
+        if (currentDados == null || currentDados.trim().isEmpty()) {
+            return buildPasswordJson(newPassword);
+        }
+
+        String dados = currentDados.trim();
+        if (dados.endsWith("}")) {
+            String base = dados.substring(0, dados.length() - 1);
+            if (base.trim().equals("{")) {
+                return buildPasswordJson(newPassword);
             }
-            return "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
+            return base + ",\"newPassword\":\"" + escapeJson(newPassword) + "\"}";
         }
+
+        return buildPasswordJson(newPassword);
     }
 
-    /**
-     * Escapa caracteres especiais para JSON
-     */
-    private String escapeJson(String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
-    }
-
-    /**
-     * Parse do JSON de dadosComplementares
-     */
     private DadosComplementaresDto parseDadosComplementares(String json) {
         if (json == null || json.trim().isEmpty()) {
             return null;
@@ -418,273 +547,52 @@ public class LoginManagementService {
         try {
             return objectMapper.readValue(json, DadosComplementaresDto.class);
         } catch (Exception e) {
-            log.warn("Erro ao parsear dadosComplementares: {}", e.getMessage());
+            log.error("❌ Erro ao parsear dadosComplementares: {}", e.getMessage());
             return null;
         }
     }
 
-    /**
-     * Constrói JSON de resultado para salvar em dadosComplementares
-     */
-    private String buildDadosJson(String userUuid, String groupUuid, String groupNome, String warning) {
-        StringBuilder json = new StringBuilder("{");
-        json.append("\"userUuid\":\"").append(userUuid).append("\"");
-
-        if (groupUuid != null) {
-            json.append(",\"groupUuid\":\"").append(groupUuid).append("\"");
-        }
-
-        if (groupNome != null) {
-            json.append(",\"groupNome\":\"").append(groupNome).append("\"");
-        }
-
-        if (warning != null) {
-            json.append(",\"warning\":\"").append(warning).append("\"");
-        }
-
-        json.append("}");
-        return json.toString();
+    private String escapeJson(String text) {
+        if (text == null) return "";
+        return text.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
     }
 
-    /**
-     * Processa reset de senha (Block + Unblock)
-     */
-    private boolean processResetPassword(LoginManagement item) {
-        // Validação do ExternalKey
-        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
-            log.warn("ExternalKey vazia para item ID: {}", item.getId());
-            updateItemStatus(item.getId(), STATUS_ERROR, "ExternalKey vazia", null, null);
-            return false;
-        }
-
-        log.info("Item ID: {} - Iniciando RESET de senha para usuário {}", item.getId(), item.getExternalKey());
-
-        try {
-            // Passo 1: BLOQUEAR usuário
-            log.info("Item ID: {} - Bloqueando usuário {}", item.getId(), item.getExternalKey());
-            ApiResponseDto blockResponse = externalApiService.blockUser(item.getExternalKey());
-
-            if (!blockResponse.isSuccess()) {
-                String errorMsg = extractErrorCode(blockResponse.getMessage());
-                updateItemStatus(item.getId(), STATUS_ERROR, "Erro no block: " + errorMsg, null, null);
-                log.error("Item ID: {} - Falha ao bloquear usuário: {}", item.getId(), blockResponse.getMessage());
-                return false;
-            }
-
-            log.info("Item ID: {} - Usuário bloqueado com sucesso", item.getId());
-
-            // Pequena pausa entre block e unblock
-            Thread.sleep(500);
-
-            // Passo 2: DESBLOQUEAR usuário
-            log.info("Item ID: {} - Desbloqueando usuário {}", item.getId(), item.getExternalKey());
-            ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
-
-            if (!unblockResponse.isSuccess()) {
-                String errorMsg = extractErrorCode(unblockResponse.getMessage());
-                updateItemStatus(item.getId(), STATUS_ERROR, "Erro no unblock: " + errorMsg, null, null);
-                log.error("Item ID: {} - Falha ao desbloquear usuário: {}", item.getId(), unblockResponse.getMessage());
-                return false;
-            }
-
-            // Passo 3: Salvar senha gerada
-            String newPassword = (String) unblockResponse.getData();
-            String dadosComplementares = null;
-
-            if (newPassword != null && !newPassword.trim().isEmpty()) {
-                dadosComplementares = "{\"newPassword\":\"" + newPassword + "\"}";
-                log.info("Item ID: {} - Reset OK. Nova senha: {}", item.getId(), newPassword);
-            } else {
-                dadosComplementares = "{\"newPassword\":\"Usuário ativo. Clicar em esqueci minha senha.\"}";
-                log.info("Item ID: {} - Reset OK. Sem senha gerada", item.getId());
-            }
-
-            updateItemStatus(item.getId(), STATUS_SUCCESS, "Reset OK", dadosComplementares, null);
-            log.info("Item ID: {} - Fluxo RESET completo: Block -> Unblock", item.getId());
-            return true;
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Item ID: {} - Processamento interrompido durante Reset", item.getId());
-            updateItemStatus(item.getId(), STATUS_ERROR, "Processamento interrompido", null, null);
-            return false;
-        } catch (Exception e) {
-            log.error("Item ID: {} - Erro durante Reset: {}", item.getId(), e.getMessage(), e);
-            updateItemStatus(item.getId(), STATUS_ERROR, "Erro no reset", null, null);
-            return false;
-        }
-    }
-
-    /**
-     * Processa bloqueio de usuário
-     */
-    private boolean processBlockUser(LoginManagement item) {
-        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
-            log.warn("ExternalKey vazia para item ID: {}", item.getId());
-            updateItemStatus(item.getId(), STATUS_ERROR, "ExternalKey vazia", null, null);
-            return false;
-        }
-
-        ApiResponseDto apiResponse = externalApiService.blockUser(item.getExternalKey());
-
-        if (apiResponse.isSuccess()) {
-            updateItemStatus(item.getId(), STATUS_SUCCESS, "Bloqueio OK", null, null);
-            log.info("Item ID: {} - Bloqueio realizado com sucesso", item.getId());
-            return true;
-        } else {
-            String errorMsg = extractErrorCode(apiResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null, null);
-            log.error("Erro no bloqueio do item ID: {} - {}", item.getId(), apiResponse.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Processa desbloqueio de usuário
-     */
-    private boolean processUnblockUser(LoginManagement item) {
-        if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
-            log.warn("ExternalKey vazia para item ID: {}", item.getId());
-            updateItemStatus(item.getId(), STATUS_ERROR, "ExternalKey vazia", null, null);
-            return false;
-        }
-
-        ApiResponseDto apiResponse = externalApiService.unblockUser(item.getExternalKey());
-
-        if (apiResponse.isSuccess()) {
-            String newPassword = (String) apiResponse.getData();
-            String dadosComplementares = null;
-
-            if (newPassword != null && !newPassword.trim().isEmpty()) {
-                dadosComplementares = "{\"newPassword\":\"" + newPassword + "\"}";
-                log.info("Item ID: {} - Desbloqueio OK. Senha: {}", item.getId(), newPassword);
-            } else {
-                log.info("Item ID: {} - Desbloqueio OK", item.getId());
-            }
-
-            updateItemStatus(item.getId(), STATUS_SUCCESS, "Desbloqueio OK", dadosComplementares, null);
-            return true;
-        } else {
-            String errorMsg = extractErrorCode(apiResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_ERROR, errorMsg, null, null);
-            log.error("Erro no desbloqueio do item ID: {} - {}", item.getId(), apiResponse.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Extrai código de erro relevante de mensagens longas
-     */
-    private String extractErrorCode(String message) {
-        if (message == null || message.isEmpty()) {
-            return "Erro desconhecido";
-        }
-
-        if (message.contains("422")) {
-            if (message.contains("ALREADY_ACTIVE")) {
-                return "Já ativo";
-            }
-            if (message.contains("ALREADY_EXISTS")) {
-                return "Já existe";
-            }
-            return "Erro 422";
-        }
-
-        if (message.contains("401") || message.contains("403")) {
-            return "Erro auth";
-        }
-
-        if (message.contains("404")) {
-            return "Não encontrado";
-        }
-
-        if (message.contains("500")) {
-            return "Erro servidor";
-        }
-
-        return truncateLog(message);
-    }
-
-    /**
-     * Trunca a mensagem de log para caber no banco
-     */
     private String truncateLog(String message) {
-        if (message == null) {
-            return "";
-        }
-
-        if (message.length() <= LOG_MAX_LENGTH) {
-            return message;
-        }
-
+        if (message == null) return "";
+        if (message.length() <= LOG_MAX_LENGTH) return message;
         return message.substring(0, LOG_MAX_LENGTH - 3) + "...";
     }
 
-    /**
-     * Valida se o JSON está bem formatado
-     */
-    private boolean isValidJson(String json) {
-        if (json == null || json.trim().isEmpty()) {
-            return false;
-        }
-
-        try {
-            objectMapper.readTree(json);
-            return true;
-        } catch (Exception e) {
-            log.warn("JSON inválido: {} - Erro: {}", json, e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Atualiza o status de um item no banco de dados
-     */
-    private void updateItemStatus(Integer itemId, Integer newStatus, String logMessage, String dadosComplementares, String externalKey) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    private void updateItemStatus(Integer itemId, Integer newStatus, String logMessage,
+                                  String dadosComplementares, String externalKey) {
         try {
             String truncatedLog = truncateLog(logMessage);
 
             if (externalKey != null && !externalKey.trim().isEmpty()) {
-                // Atualiza com externalKey (usado no CREATE)
-                repository.updateStatusWithDataAndExternalKey(itemId, newStatus, LocalDateTime.now(),
-                        truncatedLog, dadosComplementares, externalKey);
-                log.debug("Item ID: {} atualizado com externalKey: {}", itemId, externalKey);
+                repository.updateStatusWithDataAndExternalKey(itemId, newStatus,
+                        LocalDateTime.now(), truncatedLog, dadosComplementares, externalKey);
             } else if (dadosComplementares != null && !dadosComplementares.trim().isEmpty()) {
-                repository.updateStatusWithData(itemId, newStatus, LocalDateTime.now(), truncatedLog, dadosComplementares);
-                log.debug("Item ID: {} atualizado com dados complementares", itemId);
+                repository.updateStatusWithData(itemId, newStatus,
+                        LocalDateTime.now(), truncatedLog, dadosComplementares);
             } else {
                 repository.updateStatus(itemId, newStatus, LocalDateTime.now(), truncatedLog);
             }
-
-            log.debug("Status do item ID: {} atualizado para: {} - {}", itemId, getStatusDescription(newStatus), truncatedLog);
         } catch (Exception e) {
-            log.error("Erro ao atualizar status do item ID: {} - {}", itemId, e.getMessage(), e);
-
-            try {
-                String minimalLog = "Erro";
-                if (dadosComplementares != null && !dadosComplementares.trim().isEmpty()) {
-                    repository.updateStatusWithData(itemId, newStatus, LocalDateTime.now(), minimalLog, dadosComplementares);
-                } else {
-                    repository.updateStatus(itemId, newStatus, LocalDateTime.now(), minimalLog);
-                }
-                log.info("Status atualizado com mensagem mínima para item ID: {}", itemId);
-            } catch (Exception ex) {
-                log.error("Falha crítica ao atualizar item ID: {}", itemId, ex);
-            }
+            log.error("❌ Erro ao atualizar status do item {}: {}", itemId, e.getMessage());
         }
     }
 
-    /**
-     * Atualiza status COM externalKey (usado exclusivamente no CREATE)
-     */
-    private void updateItemStatusWithExternalKey(Integer itemId, Integer newStatus, String logMessage,
-                                                 String dadosComplementares, String externalKey) {
+    private void updateItemStatusWithExternalKey(Integer itemId, Integer newStatus,
+                                                 String logMessage, String dadosComplementares,
+                                                 String externalKey) {
         updateItemStatus(itemId, newStatus, logMessage, dadosComplementares, externalKey);
     }
 
-    /**
-     * Retorna o número de itens pendentes
-     */
     public long getPendingCount() {
         try {
             return repository.countPendingProcessing();
@@ -694,21 +602,14 @@ public class LoginManagementService {
         }
     }
 
-    private String getStatusDescription(Integer status) {
-        switch (status) {
-            case STATUS_ERROR: return "Erro(-4108)";
-            case STATUS_SUCCESS: return "Sucesso(-4107)";
-            case STATUS_QUEUE: return "Fila(-4106)";
-            default: return "Desconhecido(" + status + ")";
-        }
-    }
-
     private String getManagementTypeDescription(Integer type) {
         switch (type) {
             case TYPE_BLOCK: return "Block(-4104)";
             case TYPE_UNBLOCK: return "Unblock(-4105)";
             case TYPE_CREATE: return "Create(3833)";
             case TYPE_RESET: return "Reset(2268)";
+            case TYPE_LINK_GROUP: return "VincularGrupo(4480)";
+            case TYPE_BANNED: return "Banido(5050)";
             default: return "Desconhecido(" + type + ")";
         }
     }

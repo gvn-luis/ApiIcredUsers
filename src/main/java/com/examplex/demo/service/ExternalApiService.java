@@ -1,19 +1,22 @@
 package com.examplex.demo.service;
 
-import com.examplex.demo.model.dto.ApiRequestDto;
-import com.examplex.demo.model.dto.ApiResponseDto;
-import com.examplex.demo.model.dto.ApiCreateUserRequestDto;
-import com.examplex.demo.model.dto.ApiCreateGroupRequestDto;
+import com.examplex.demo.exception.ExternalApiException;
+import com.examplex.demo.model.dto.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
 
+/**
+ * Service responsável por comunicação com a API externa iCred
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -21,6 +24,7 @@ public class ExternalApiService {
 
     private final RestTemplate restTemplate;
     private final AuthTokenService authTokenService;
+    private final ObjectMapper objectMapper;
 
     @Value("${external-api.base-url}")
     private String baseUrl;
@@ -32,225 +36,272 @@ public class ExternalApiService {
     private Integer userProfileId;
 
     /**
-     * Cria os headers padrão com autenticação
+     * Cria headers com autenticação Bearer
      */
     private HttpHeaders createAuthHeaders() {
-        String token = authTokenService.getValidToken();
-
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(token);
-
+        headers.setBearerAuth(authTokenService.getValidToken());
         return headers;
     }
 
     /**
      * Cria um novo grupo de vendedores
+     * ATUALIZADO: Agora envia personCode no body
      */
-    public ApiResponseDto createSellerGroup(String name, String partnerExternalKey) {
+    public ApiResponseDto createSellerGroup(String name, String personCode) {
+        String endpoint = "/partner-management/v1/seller-groups";
+
         try {
-            String url = baseUrl + "/partner-management/v1/seller-groups";
-
+            // ✅ MUDANÇA: Agora usa personCode ao invés de partnerExternalKey
             ApiCreateGroupRequestDto request = new ApiCreateGroupRequestDto(
-                    name,
-                    name,  // label = name
-                    partnerExternalKey
+                    name,      // name
+                    name,      // label
+                    personCode // personCode (era partnerExternalKey)
             );
 
-            HttpHeaders headers = createAuthHeaders();
-            HttpEntity<ApiCreateGroupRequestDto> httpEntity = new HttpEntity<>(request, headers);
+            log.info("Criando grupo: {} (personCode: {})", name, personCode);
 
-            log.info("Criando grupo: {} na URL: {}", name, url);
+            ResponseEntity<Map> response = executePost(endpoint, request, Map.class);
+            String groupUuid = extractUuid(response);
 
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.POST, httpEntity, Map.class
-            );
+            log.info("Grupo criado com sucesso. UUID: {}", groupUuid);
+            return ApiResponseDto.success("Grupo criado com sucesso", groupUuid);
 
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                String groupUuid = (String) response.getBody().get("uuid");
-
-                log.info("Grupo criado com sucesso. UUID: {}", groupUuid);
-                return new ApiResponseDto(true, "Grupo criado com sucesso", groupUuid);
-            } else {
-                log.error("Erro ao criar grupo: Status {}", response.getStatusCode());
-                return new ApiResponseDto(false, "Erro na criação do grupo: " + response.getStatusCode(), null);
-            }
-
-        } catch (RestClientException e) {
-            log.error("Erro na chamada da API para criar grupo {}: {}", name, e.getMessage());
-
-            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
-                log.warn("Token inválido detectado, invalidando para renovação");
-                authTokenService.invalidateToken();
-            }
-
-            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        } catch (ExternalApiException e) {
+            log.error("Erro ao criar grupo {}: {}", name, e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
         }
     }
 
     /**
      * Cria um novo usuário na API externa
+     * @throws ExternalApiException se usuário estiver banido (CORE__PREVENT_FOUND)
      */
     public ApiResponseDto createUser(String personCode) {
-        try {
-            String url = baseUrl + "/partner-management/v1/users";
+        String endpoint = "/partner-management/v1/users";
 
+        try {
             ApiCreateUserRequestDto request = new ApiCreateUserRequestDto(
                     personCode,
                     userProfileId,
                     partnerUuid
             );
 
-            HttpHeaders headers = createAuthHeaders();
-            HttpEntity<ApiCreateUserRequestDto> httpEntity = new HttpEntity<>(request, headers);
+            log.info("Criando usuário com personCode: {}", personCode);
 
-            log.info("Criando usuário com personCode: {} na URL: {}", personCode, url);
+            ResponseEntity<Map> response = executePost(endpoint, request, Map.class);
+            String userUuid = extractUuid(response);
 
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.POST, httpEntity, Map.class
-            );
+            log.info("Usuário criado com sucesso. UUID: {}", userUuid);
+            return ApiResponseDto.success("Usuário criado com sucesso", userUuid);
 
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                // Extrai o UUID do usuário criado
-                String userUuid = (String) response.getBody().get("uuid");
-
-                log.info("Usuário criado com sucesso. UUID: {}", userUuid);
-                return new ApiResponseDto(true, "Usuário criado com sucesso", userUuid);
-            } else {
-                log.error("Erro ao criar usuário: Status {}", response.getStatusCode());
-                return new ApiResponseDto(false, "Erro na criação: " + response.getStatusCode(), null);
+        } catch (ExternalApiException e) {
+            // Se for usuário banido, propaga a exceção para tratamento especial
+            if (e.isBannedUser()) {
+                log.warn("Usuário {} está banido: {}", personCode, e.getMessage());
+                throw e;
             }
-
-        } catch (RestClientException e) {
-            log.error("Erro na chamada da API para criar usuário {}: {}", personCode, e.getMessage());
-
-            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
-                log.warn("Token inválido detectado, invalidando para renovação");
-                authTokenService.invalidateToken();
-            }
-
-            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+            log.error("Erro ao criar usuário {}: {}", personCode, e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
         }
     }
 
     /**
-     * Adiciona um usuário a um grupo
+     * Adiciona um usuário (seller) a um grupo
+     * ATUALIZADO: Agora usa /sellers e envia personCode no body
+     *
+     * @param groupUuid UUID do grupo
+     * @param personCode CPF do usuário
      */
-    public ApiResponseDto addUserToGroup(String groupUuid, String userUuid) {
+    public ApiResponseDto addUserToGroup(String groupUuid, String personCode) {
+        // ✅ MUDANÇA: Rota mudou de /users/{userUuid} para /sellers
+        String endpoint = String.format("/partner-management/v1/seller-groups/%s/sellers", groupUuid);
+
         try {
-            String url = baseUrl + "/partner-management/v1/seller-groups/" + groupUuid + "/users/" + userUuid;
+            // ✅ MUDANÇA: Agora envia personCode no body
+            AddSellerToGroupRequest request = new AddSellerToGroupRequest(personCode);
 
-            HttpHeaders headers = createAuthHeaders();
-            HttpEntity<Void> httpEntity = new HttpEntity<>(headers);
+            log.info("Adicionando seller (personCode: {}) ao grupo {}", personCode, groupUuid);
 
-            log.info("Adicionando usuário {} ao grupo {} na URL: {}", userUuid, groupUuid, url);
+            ResponseEntity<Object> response = executePost(endpoint, request, Object.class);
 
-            ResponseEntity<Object> response = restTemplate.exchange(
-                    url, HttpMethod.PUT, httpEntity, Object.class
-            );
+            log.info("Seller {} adicionado ao grupo {} com sucesso", personCode, groupUuid);
+            return ApiResponseDto.success("Seller adicionado ao grupo com sucesso", response.getBody());
 
-            if (response.getStatusCode().is2xxSuccessful()) {
-                log.info("Usuário {} adicionado ao grupo {} com sucesso", userUuid, groupUuid);
-                return new ApiResponseDto(true, "Usuário adicionado ao grupo com sucesso", response.getBody());
-            } else {
-                log.error("Erro ao adicionar usuário ao grupo: Status {}", response.getStatusCode());
-                return new ApiResponseDto(false, "Erro ao adicionar ao grupo: " + response.getStatusCode(), null);
-            }
-
-        } catch (RestClientException e) {
-            log.error("Erro na chamada da API para adicionar usuário ao grupo: {}", e.getMessage());
-
-            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
-                log.warn("Token inválido detectado, invalidando para renovação");
-                authTokenService.invalidateToken();
-            }
-
-            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        } catch (ExternalApiException e) {
+            log.error("Erro ao adicionar seller ao grupo: {}", e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
         }
     }
 
     /**
-     * Bloqueia um usuário na API externa
+     * Bloqueia um usuário
      */
     public ApiResponseDto blockUser(String userExternalKey) {
+        String endpoint = String.format("/partner-management/v1/users/%s/block", userExternalKey);
+
         try {
-            String url = baseUrl + "/partner-management/v1/users/" + userExternalKey + "/block";
-
             ApiRequestDto request = new ApiRequestDto(partnerUuid, "iCred block");
-            HttpHeaders headers = createAuthHeaders();
-            HttpEntity<ApiRequestDto> httpEntity = new HttpEntity<>(request, headers);
 
-            log.info("Bloqueando usuário: {} na URL: {}", userExternalKey, url);
+            log.info("Bloqueando usuário: {}", userExternalKey);
 
-            ResponseEntity<Object> response = restTemplate.exchange(
-                    url, HttpMethod.POST, httpEntity, Object.class
-            );
+            ResponseEntity<Object> response = executePost(endpoint, request, Object.class);
 
-            if (response.getStatusCode().is2xxSuccessful()) {
-                log.info("Usuário {} bloqueado com sucesso", userExternalKey);
-                return new ApiResponseDto(true, "Usuário bloqueado com sucesso", response.getBody());
-            } else {
-                log.error("Erro ao bloquear usuário {}: Status {}", userExternalKey, response.getStatusCode());
-                return new ApiResponseDto(false, "Erro no bloqueio: " + response.getStatusCode(), null);
-            }
+            log.info("Usuário {} bloqueado com sucesso", userExternalKey);
+            return ApiResponseDto.success("Usuário bloqueado com sucesso", response.getBody());
 
-        } catch (RestClientException e) {
-            log.error("Erro na chamada da API para bloquear usuário {}: {}", userExternalKey, e.getMessage());
-
-            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
-                log.warn("Token inválido detectado, invalidando para renovação");
-                authTokenService.invalidateToken();
-            }
-
-            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+        } catch (ExternalApiException e) {
+            log.error("Erro ao bloquear usuário {}: {}", userExternalKey, e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
         }
     }
 
     /**
-     * Desbloqueia um usuário na API externa
+     * Desbloqueia um usuário e retorna nova senha (se gerada)
      */
     public ApiResponseDto unblockUser(String userExternalKey) {
+        String endpoint = String.format("/partner-management/v1/users/%s/unblock", userExternalKey);
+
         try {
-            String url = baseUrl + "/partner-management/v1/users/" + userExternalKey + "/unblock";
+            ApiRequestDto request = new ApiRequestDto(partnerUuid, "iCred unblock");
 
-            ApiRequestDto request = new ApiRequestDto(partnerUuid, "iCred block");
+            log.info("Desbloqueando usuário: {}", userExternalKey);
+
+            ResponseEntity<Map> response = executePost(endpoint, request, Map.class);
+            String password = extractPassword(response);
+
+            log.info("Usuário {} desbloqueado com sucesso", userExternalKey);
+            return ApiResponseDto.success("Usuário desbloqueado com sucesso", password);
+
+        } catch (ExternalApiException e) {
+            log.error("Erro ao desbloquear usuário {}: {}", userExternalKey, e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
+        }
+    }
+
+    /**
+     * Lista vendedores de um grupo
+     */
+    public ApiResponseDto listGroupSellers(String groupUuid) {
+        String endpoint = String.format("/partner-management/v1/seller-groups/%s/sellers", groupUuid);
+
+        try {
+            log.info("Listando vendedores do grupo: {}", groupUuid);
+
+            ResponseEntity<Object> response = executeGet(endpoint, Object.class);
+
+            log.info("Vendedores do grupo {} listados com sucesso", groupUuid);
+            return ApiResponseDto.success("Vendedores listados com sucesso", response.getBody());
+
+        } catch (ExternalApiException e) {
+            log.error("Erro ao listar vendedores do grupo {}: {}", groupUuid, e.getMessage());
+            return ApiResponseDto.error(e.getMessage());
+        }
+    }
+
+    /**
+     * Executa uma requisição POST
+     */
+    private <T, R> ResponseEntity<R> executePost(String endpoint, T body, Class<R> responseType) {
+        return execute(endpoint, HttpMethod.POST, body, responseType);
+    }
+
+    /**
+     * Executa uma requisição GET
+     */
+    private <R> ResponseEntity<R> executeGet(String endpoint, Class<R> responseType) {
+        return execute(endpoint, HttpMethod.GET, null, responseType);
+    }
+
+    /**
+     * Método genérico para executar requisições HTTP
+     */
+    private <T, R> ResponseEntity<R> execute(String endpoint, HttpMethod method, T body, Class<R> responseType) {
+        String url = baseUrl + endpoint;
+
+        try {
             HttpHeaders headers = createAuthHeaders();
-            HttpEntity<ApiRequestDto> httpEntity = new HttpEntity<>(request, headers);
+            HttpEntity<T> entity = new HttpEntity<>(body, headers);
 
-            log.info("Desbloqueando usuário: {} na URL: {}", userExternalKey, url);
+            return restTemplate.exchange(url, method, entity, responseType);
 
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.POST, httpEntity, Map.class
+        } catch (HttpClientErrorException e) {
+            handleHttpError(e);
+            throw new ExternalApiException("Erro na chamada da API", e);
+        } catch (RestClientException e) {
+            log.error("Erro de comunicação com a API: {}", e.getMessage());
+            invalidateTokenIfUnauthorized(e);
+            throw new ExternalApiException("Erro de comunicação com a API: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Trata erros HTTP e extrai informações do corpo da resposta
+     */
+    private void handleHttpError(HttpClientErrorException e) {
+        try {
+            Map<String, Object> errorBody = objectMapper.readValue(
+                    e.getResponseBodyAsString(),
+                    Map.class
             );
 
-            if (response.getStatusCode().is2xxSuccessful()) {
-                log.info("Usuário {} desbloqueado com sucesso", userExternalKey);
+            Integer httpStatus = (Integer) errorBody.get("httpStatus");
+            Object errorsObj = errorBody.get("errors");
 
-                String newPassword = null;
-                if (response.getBody() != null && response.getBody().containsKey("newPassword")) {
-                    newPassword = (String) response.getBody().get("newPassword");
-                    log.info("Nova senha gerada para usuário {}", userExternalKey);
-                } else {
-                    // Se não gerou senha, retorna mensagem padrão
-                    newPassword = "Usuário ativo. Clicar em esqueci minha senha.";
-                    log.info("Usuário {} desbloqueado sem geração de senha", userExternalKey);
+            if (errorsObj instanceof java.util.List) {
+                java.util.List<Map<String, Object>> errors = (java.util.List<Map<String, Object>>) errorsObj;
+                if (!errors.isEmpty()) {
+                    Map<String, Object> firstError = errors.get(0);
+                    String errorCode = (String) firstError.get("code");
+                    String userMessage = (String) firstError.get("userMessage");
+
+                    throw new ExternalApiException(userMessage, httpStatus, errorCode);
                 }
-
-                return new ApiResponseDto(true, "Usuário desbloqueado com sucesso", newPassword);
-            } else {
-                log.error("Erro ao desbloquear usuário {}: Status {}", userExternalKey, response.getStatusCode());
-                return new ApiResponseDto(false, "Erro no desbloqueio: " + response.getStatusCode(), null);
             }
 
-        } catch (RestClientException e) {
-            log.error("Erro na chamada da API para desbloquear usuário {}: {}", userExternalKey, e.getMessage());
+            throw new ExternalApiException("Erro HTTP " + e.getStatusCode(), e);
 
-            if (e.getMessage() != null && (e.getMessage().contains("401") || e.getMessage().contains("403"))) {
-                log.warn("Token inválido detectado, invalidando para renovação");
-                authTokenService.invalidateToken();
+        } catch (Exception ex) {
+            if (ex instanceof ExternalApiException) {
+                throw (ExternalApiException) ex;
             }
-
-            return new ApiResponseDto(false, "Erro na chamada da API: " + e.getMessage(), null);
+            throw new ExternalApiException("Erro HTTP " + e.getStatusCode() + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Invalida token se erro for de autenticação
+     */
+    private void invalidateTokenIfUnauthorized(RestClientException e) {
+        String message = e.getMessage();
+        if (message != null && (message.contains("401") || message.contains("403"))) {
+            log.warn("Token inválido detectado, invalidando para renovação");
+            authTokenService.invalidateToken();
+        }
+    }
+
+    /**
+     * Extrai UUID da resposta
+     */
+    private String extractUuid(ResponseEntity<Map> response) {
+        if (response.getBody() == null) {
+            throw new ExternalApiException("Resposta vazia da API");
+        }
+        String uuid = (String) response.getBody().get("uuid");
+        if (uuid == null) {
+            throw new ExternalApiException("UUID não encontrado na resposta");
+        }
+        return uuid;
+    }
+
+    /**
+     * Extrai senha da resposta de unblock
+     */
+    private String extractPassword(ResponseEntity<Map> response) {
+        if (response.getBody() == null || !response.getBody().containsKey("newPassword")) {
+            return "Usuário ativo. Clicar em esqueci minha senha.";
+        }
+        return (String) response.getBody().get("newPassword");
     }
 }

@@ -15,7 +15,7 @@ import java.util.List;
 public interface LoginManagementRepository extends JpaRepository<LoginManagement, Integer> {
 
     /**
-     * Busca itens pendentes de processamento (Status: Fila = -4106 ou Erro = -4108)
+     * Busca itens pendentes de processamento (Status: Fila, Erro, Pendência)
      */
     @Query("SELECT lm FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4108) AND lm.registroExcluido = false")
     List<LoginManagement> findPendingProcessing();
@@ -65,8 +65,8 @@ public interface LoginManagementRepository extends JpaRepository<LoginManagement
                                             @Param("externalKey") String externalKey);
 
     /**
-     * Conta o número de itens pendentes
+     * Conta o número de itens pendentes (Fila, Erro, Pendência)
      */
-    @Query("SELECT COUNT(lm) FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4108) AND lm.registroExcluido = false")
+    @Query("SELECT COUNT(lm) FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4108, -4109) AND lm.registroExcluido = false")
     long countPendingProcessing();
 }

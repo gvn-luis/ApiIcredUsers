@@ -1,14 +1,15 @@
 package com.examplex.demo.model.dto;
 
-import lombok.Data;
 import lombok.AllArgsConstructor;
+import lombok.Data;
 import lombok.NoArgsConstructor;
 
+/**
+ * Request para adicionar seller ao grupo
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-public class ApiCreateRequestDto {
+public class AddSellerToGroupRequest {
     private String personCode;
-    private String userProfileId;
-    private String partnerUuid;
 }
