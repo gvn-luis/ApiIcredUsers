@@ -134,18 +134,7 @@ public class IcredGvnUserController {
         return ResponseEntity.ok(result);
     }
 
-    /**
-     * Cria um grupo de vendedores
-     */
-    @PostMapping("/createSellerGroup")
-    public ResponseEntity<ApiResponseDto> createSellerGroup(@Valid @RequestBody ApiCreateGroupRequestDto request) {
-        log.info("Criando grupo: {}", request.getName());
-        ApiResponseDto result = externalApiService.createSellerGroup(
-                request.getName(),
-                request.getPartnerExternalKey()
-        );
-        return ResponseEntity.ok(result);
-    }
+
 
     /**
      * Cria um usuário diretamente

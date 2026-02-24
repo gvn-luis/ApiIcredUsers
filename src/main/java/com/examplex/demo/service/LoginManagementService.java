@@ -7,6 +7,7 @@ import com.examplex.demo.model.dto.ApiResponseDto;
 import com.examplex.demo.model.dto.DadosComplementaresDto;
 import com.examplex.demo.repository.LoginManagementRepository;
 import com.examplex.demo.repository.LoginManagementGroupsRepository;
+import com.examplex.demo.repository.PartnerKeyRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,6 +18,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -25,6 +28,7 @@ public class LoginManagementService {
 
     private final LoginManagementRepository repository;
     private final LoginManagementGroupsRepository groupsRepository;
+    private final PartnerKeyRepository partnerKeyRepository;
     private final ExternalApiService externalApiService;
     private final ObjectMapper objectMapper;
 
@@ -47,7 +51,6 @@ public class LoginManagementService {
 
     /**
      * Processa todos os itens pendentes
-     * NÃO tem @Transactional para evitar rollback de toda a transação
      */
     public void processLoginManagement() {
         log.info("========================================");
@@ -94,9 +97,6 @@ public class LoginManagementService {
         log.info("========================================");
     }
 
-    /**
-     * Processa um item individual
-     */
     private boolean processItem(LoginManagement item) {
         log.info("📋 USUÁRIO: {} | Tipo: {} | ID: {}",
                 item.getUserCode(),
@@ -121,9 +121,6 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * TYPE -4105: UNBLOCK
-     */
     private boolean processUnblockUser(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
@@ -132,37 +129,28 @@ public class LoginManagementService {
         }
 
         log.info("🔓 Solicitando UNBLOCK...");
-
         ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
 
-        // ✅ Caso 1: UNBLOCK funcionou
         if (unblockResponse.isSuccess()) {
             String newPassword = extractPassword(unblockResponse);
             String dadosComplementares = buildPasswordJson(newPassword);
-
             log.info("✅ UNBLOCK concluído - Senha: {}", maskPassword(newPassword));
             updateItemStatus(item.getId(), STATUS_SUCCESS, "Desbloqueio OK", dadosComplementares, null);
             return true;
         }
 
-        // ⚠️ Caso 2: Usuário JÁ ESTÁ ATIVO → Fazer RESET
         if (unblockResponse.getMessage() != null &&
                 unblockResponse.getMessage().toLowerCase().contains("já está ativo")) {
-
             log.warn("⚠️  Usuário já ativo. Executando RESET para gerar nova senha...");
             return executeReset(item, "RESET (já ativo)");
         }
 
-        // ❌ Caso 3: Outro erro
         log.error("❌ Falha no UNBLOCK: {}", unblockResponse.getMessage());
         updateItemStatus(item.getId(), STATUS_PENDING,
                 truncateLog(unblockResponse.getMessage()), null, null);
         return false;
     }
 
-    /**
-     * TYPE 2268: RESET
-     */
     private boolean processResetPassword(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
@@ -174,23 +162,17 @@ public class LoginManagementService {
         return executeReset(item, "Reset OK");
     }
 
-    /**
-     * Executa RESET (Block + Unblock)
-     */
     private boolean executeReset(LoginManagement item, String successMessage) {
         try {
-            // Passo 1: Tentar BLOQUEAR
             log.info("   → Bloqueando usuário...");
             ApiResponseDto blockResponse = externalApiService.blockUser(item.getExternalKey());
 
-            // ⚠️ Caso especial: Usuário não relacionado ao corban
             if (!blockResponse.isSuccess() && blockResponse.getMessage() != null) {
                 String msg = blockResponse.getMessage().toLowerCase();
 
                 if (msg.contains("user_not_related_to_partner") ||
                         msg.contains("não relacionado ao corban") ||
                         msg.contains("nao relacionado ao corban")) {
-
                     log.warn("⚠️  Usuário não vinculado ao corban. Executando apenas UNBLOCK...");
                     return executeOnlyUnblock(item, "UNBLOCK (vincular)");
                 }
@@ -206,7 +188,6 @@ public class LoginManagementService {
             log.info("   ✅ Bloqueado");
             Thread.sleep(500);
 
-            // Passo 2: DESBLOQUEAR
             log.info("   → Desbloqueando usuário...");
             ApiResponseDto unblockResponse = externalApiService.unblockUser(item.getExternalKey());
 
@@ -238,9 +219,6 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * Executa apenas UNBLOCK (sem BLOCK antes)
-     */
     private boolean executeOnlyUnblock(LoginManagement item, String successMessage) {
         log.info("🔓 Executando UNBLOCK (vincular ao corban)...");
 
@@ -261,9 +239,6 @@ public class LoginManagementService {
         return true;
     }
 
-    /**
-     * TYPE -4104: BLOCK
-     */
     private boolean processBlockUser(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
@@ -288,12 +263,12 @@ public class LoginManagementService {
 
     /**
      * TYPE 4480: LINK_GROUP
-     * ✅ ATUALIZADO: Agora usa personCode ao invés de userUuid
+     *
+     * NOVO: Se UUID vazio mas nome preenchido, CRIA o grupo primeiro
      */
     private boolean processLinkToGroup(LoginManagement item) {
         log.info("🔗 VINCULAR USUÁRIO A GRUPO");
 
-        // ✅ MUDANÇA: Agora precisa de userCode (CPF) ao invés de externalKey (UUID)
         if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
             log.warn("⚠️  UserCode (CPF) vazio");
             updateItemStatus(item.getId(), STATUS_PENDING, "UserCode vazio", null, null);
@@ -301,17 +276,38 @@ public class LoginManagementService {
         }
 
         DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
-        if (dados == null || dados.getManagementGroupsUuid() == null) {
-            log.warn("⚠️  UUID do grupo não informado");
-            updateItemStatus(item.getId(), STATUS_PENDING, "UUID grupo vazio", null, null);
+        if (dados == null) {
+            log.warn("⚠️  dadosComplementares inválido");
+            updateItemStatus(item.getId(), STATUS_PENDING, "Dados inválidos", null, null);
             return false;
         }
 
         String groupUuid = dados.getManagementGroupsUuid();
+        String groupNome = dados.getManagementGroupsNome();
+
+        // Caso 1: UUID preenchido → Vincular diretamente
+        if (groupUuid != null && !groupUuid.trim().isEmpty()) {
+            return linkToExistingGroup(item, groupUuid);
+        }
+
+        // Caso 2: UUID vazio mas Nome preenchido → Criar grupo primeiro
+        if (groupNome != null && !groupNome.trim().isEmpty()) {
+            return createGroupAndLinkForType4480(item, groupNome);
+        }
+
+        // Caso 3: Ambos vazios → Erro
+        log.warn("⚠️  UUID e Nome do grupo vazios");
+        updateItemStatus(item.getId(), STATUS_PENDING, "UUID e Nome vazios", null, null);
+        return false;
+    }
+
+    /**
+     * Vincula a grupo existente (UUID preenchido)
+     */
+    private boolean linkToExistingGroup(LoginManagement item, String groupUuid) {
         log.info("   → PersonCode (CPF): {}", item.getUserCode());
         log.info("   → GroupUUID: {}", groupUuid);
 
-        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de userUuid
         ApiResponseDto response = externalApiService.addUserToGroup(groupUuid, item.getUserCode());
 
         if (response.isSuccess()) {
@@ -323,6 +319,90 @@ public class LoginManagementService {
             updateItemStatus(item.getId(), STATUS_PENDING,
                     "Erro: " + truncateLog(response.getMessage()), null, null);
             return false;
+        }
+    }
+
+    /**
+     * Cria grupo e vincula (Nome preenchido, UUID vazio) - TYPE 4480
+     */
+    private boolean createGroupAndLinkForType4480(LoginManagement item, String groupNome) {
+        log.info("📁 UUID vazio → Criando novo grupo: {}", groupNome);
+
+        // Extrair pessoaId do nome (ex: "GVN | 46711 | Paula" → 46711)
+        Integer pessoaId = extractPessoaIdFromGroupName(groupNome);
+        if (pessoaId == null) {
+            log.warn("⚠️  Não foi possível extrair pessoaId do nome: {}", groupNome);
+            updateItemStatus(item.getId(), STATUS_PENDING, "PessoaId não encontrado", null, null);
+            return false;
+        }
+
+        log.info("   → PessoaId extraído: {}", pessoaId);
+
+        // Buscar partnerExternalKey no banco
+        String partnerExternalKey = partnerKeyRepository.findPartnerExternalKeyByPessoaId(pessoaId);
+        if (partnerExternalKey == null || partnerExternalKey.trim().isEmpty()) {
+            log.warn("⚠️  PartnerExternalKey não encontrado para pessoaId: {}", pessoaId);
+            updateItemStatus(item.getId(), STATUS_PENDING, "PartnerKey não encontrado", null, null);
+            return false;
+        }
+
+        log.info("   → PartnerExternalKey: {}", partnerExternalKey);
+
+        // Criar grupo
+        // Label = pessoaId para evitar "Tamanho do label inválido"
+        String label = String.valueOf(pessoaId);
+        ApiResponseDto groupResponse = externalApiService.createSellerGroup(groupNome, label, partnerExternalKey);
+
+        if (!groupResponse.isSuccess()) {
+            log.error("❌ Falha ao criar grupo: {}", groupResponse.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING,
+                    "Erro ao criar grupo: " + truncateLog(groupResponse.getMessage()), null, null);
+            return false;
+        }
+
+        String newGroupUuid = (String) groupResponse.getData();
+        log.info("✅ Grupo criado - UUID: {}", newGroupUuid);
+
+        // Salvar grupo no banco
+        saveGroupToDatabase(newGroupUuid, groupNome, partnerExternalKey);
+
+        // Vincular usuário ao grupo
+        ApiResponseDto linkResponse = externalApiService.addUserToGroup(newGroupUuid, item.getUserCode());
+
+        if (!linkResponse.isSuccess()) {
+            log.warn("⚠️  Grupo criado mas falha ao vincular: {}", linkResponse.getMessage());
+            updateItemStatus(item.getId(), STATUS_PENDING,
+                    "Grupo criado, erro vincular", null, null);
+            return false;
+        }
+
+        log.info("✅ Usuário vinculado ao novo grupo com sucesso!");
+        updateItemStatus(item.getId(), STATUS_SUCCESS, "Grupo criado e vinculado", null, null);
+        return true;
+    }
+
+    /**
+     * Extrai pessoaId do nome do grupo
+     * Formato esperado: "GVN | 46711 | Paula" ou "GVN|46711|Paula"
+     * Retorna: 46711
+     */
+    private Integer extractPessoaIdFromGroupName(String groupNome) {
+        try {
+            // Regex para extrair número no meio (formato: XXX | 12345 | XXX)
+            Pattern pattern = Pattern.compile("\\|\\s*(\\d+)\\s*\\|");
+            Matcher matcher = pattern.matcher(groupNome);
+
+            if (matcher.find()) {
+                String numberStr = matcher.group(1);
+                return Integer.parseInt(numberStr);
+            }
+
+            log.warn("Formato do nome do grupo não reconhecido: {}", groupNome);
+            return null;
+
+        } catch (Exception e) {
+            log.error("Erro ao extrair pessoaId de '{}': {}", groupNome, e.getMessage());
+            return null;
         }
     }
 
@@ -339,7 +419,6 @@ public class LoginManagementService {
         log.info("👤 CRIAR USUÁRIO");
 
         try {
-            // Tenta criar usuário
             ApiResponseDto createResponse = externalApiService.createUser(item.getUserCode());
 
             if (!createResponse.isSuccess()) {
@@ -352,18 +431,18 @@ public class LoginManagementService {
             String userUuid = (String) createResponse.getData();
             log.info("✅ Usuário criado - UUID: {}", userUuid);
 
-            // Analisa dados complementares para grupo
             DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
 
-            if (dados != null && dados.getManagementGroupsUuid() != null) {
-                // Vincular a grupo existente
+            if (dados != null &&
+                    dados.getManagementGroupsUuid() != null &&
+                    !dados.getManagementGroupsUuid().trim().isEmpty()) {
                 linkUserToGroup(item, dados.getManagementGroupsUuid());
-            } else if (dados != null && dados.getManagementGroupsNome() != null) {
-                // Criar novo grupo e vincular
+            } else if (dados != null &&
+                    dados.getManagementGroupsNome() != null &&
+                    !dados.getManagementGroupsNome().trim().isEmpty()) {
                 createGroupAndLink(item, dados.getManagementGroupsNome());
             }
 
-            // Block + Unblock para gerar senha
             executeBlockAndUnblock(item.getId(), userUuid);
 
             updateItemStatusWithExternalKey(item.getId(), STATUS_SUCCESS,
@@ -371,7 +450,6 @@ public class LoginManagementService {
             return true;
 
         } catch (ExternalApiException e) {
-            // Usuário BANIDO
             if (e.isBannedUser()) {
                 log.warn("🚫 Usuário BANIDO: {} - {}", item.getUserCode(), e.getMessage());
                 updateItemAsBanned(item.getId(), e.getMessage());
@@ -381,14 +459,9 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * Vincula usuário a grupo existente
-     * ✅ ATUALIZADO: Agora usa personCode (CPF) ao invés de userUuid
-     */
     private void linkUserToGroup(LoginManagement item, String groupUuid) {
         log.info("🔗 Vinculando ao grupo: {}", groupUuid);
 
-        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de userUuid
         ApiResponseDto response = externalApiService.addUserToGroup(groupUuid, item.getUserCode());
 
         if (response.isSuccess()) {
@@ -398,36 +471,40 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * Cria novo grupo e vincula usuário
-     * ✅ ATUALIZADO: Agora usa personCode ao criar grupo e vincular
-     */
     private void createGroupAndLink(LoginManagement item, String groupNome) {
         log.info("📁 Criando novo grupo: {}", groupNome);
 
-        // ✅ MUDANÇA: Passa personCode (CPF) ao invés de partnerExternalKey
-        ApiResponseDto groupResponse = externalApiService.createSellerGroup(
-                groupNome,
-                item.getUserCode()  // personCode (CPF)
-        );
+        // Extrair pessoaId
+        Integer pessoaId = extractPessoaIdFromGroupName(groupNome);
+        String partnerExternalKey;
+
+        if (pessoaId != null) {
+            partnerExternalKey = partnerKeyRepository.findPartnerExternalKeyByPessoaId(pessoaId);
+            if (partnerExternalKey == null) {
+                log.warn("⚠️  PartnerKey não encontrado para pessoaId {}, usando userCode", pessoaId);
+                partnerExternalKey = item.getUserCode();
+            }
+        } else {
+            log.warn("⚠️  PessoaId não extraído, usando userCode como partnerExternalKey");
+            partnerExternalKey = item.getUserCode();
+        }
+
+        // Label = pessoaId (se extraído) ou "GRP" + timestamp
+        String label = (pessoaId != null) ? String.valueOf(pessoaId) : "GRP" + System.currentTimeMillis();
+
+        ApiResponseDto groupResponse = externalApiService.createSellerGroup(groupNome, label, partnerExternalKey);
 
         if (groupResponse.isSuccess()) {
             String groupUuid = (String) groupResponse.getData();
             log.info("✅ Grupo criado - UUID: {}", groupUuid);
 
-            // Salvar no banco
-            saveGroupToDatabase(groupUuid, groupNome, item.getUserCode());
-
-            // Vincular usuário
+            saveGroupToDatabase(groupUuid, groupNome, partnerExternalKey);
             linkUserToGroup(item, groupUuid);
         } else {
             log.warn("⚠️  Falha ao criar grupo: {}", groupResponse.getMessage());
         }
     }
 
-    /**
-     * Salva grupo no banco de dados
-     */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     private void saveGroupToDatabase(String uuid, String nome, String partnerKey) {
         try {
@@ -442,18 +519,13 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * Executa Block + Unblock para gerar senha inicial
-     */
     private void executeBlockAndUnblock(Integer itemId, String userUuid) {
         try {
             log.info("🔐 Executando Block + Unblock...");
 
-            // Block
             externalApiService.blockUser(userUuid);
             Thread.sleep(500);
 
-            // Unblock
             ApiResponseDto unblockResponse = externalApiService.unblockUser(userUuid);
 
             if (unblockResponse.isSuccess()) {
@@ -473,9 +545,6 @@ public class LoginManagementService {
         }
     }
 
-    /**
-     * Marca item como usuário banido
-     */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     private void updateItemAsBanned(Integer itemId, String message) {
         try {

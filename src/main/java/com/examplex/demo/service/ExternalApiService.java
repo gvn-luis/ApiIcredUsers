@@ -35,9 +35,6 @@ public class ExternalApiService {
     @Value("${external-api.user-profile-id:5}")
     private Integer userProfileId;
 
-    /**
-     * Cria headers com autenticação Bearer
-     */
     private HttpHeaders createAuthHeaders() {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -47,20 +44,23 @@ public class ExternalApiService {
 
     /**
      * Cria um novo grupo de vendedores
-     * ATUALIZADO: Agora envia personCode no body
+     *
+     * @param name Nome completo do grupo (ex: "GVN | 54250 | Fernando")
+     * @param label Label curto (ex: "54250")
+     * @param partnerExternalKey UUID do parceiro
      */
-    public ApiResponseDto createSellerGroup(String name, String personCode) {
+    public ApiResponseDto createSellerGroup(String name, String label, String partnerExternalKey) {
         String endpoint = "/partner-management/v1/seller-groups";
 
         try {
-            // ✅ MUDANÇA: Agora usa personCode ao invés de partnerExternalKey
             ApiCreateGroupRequestDto request = new ApiCreateGroupRequestDto(
-                    name,      // name
-                    name,      // label
-                    personCode // personCode (era partnerExternalKey)
+                    name,                  // name: "GVN | 54250 | Fernando"
+                    label,                 // label: "54250" (curto!)
+                    partnerExternalKey     // partnerExternalKey (UUID)
             );
 
-            log.info("Criando grupo: {} (personCode: {})", name, personCode);
+            log.info("Criando grupo: {} (label: {}, partnerExternalKey: {})",
+                    name, label, partnerExternalKey);
 
             ResponseEntity<Map> response = executePost(endpoint, request, Map.class);
             String groupUuid = extractUuid(response);
@@ -76,7 +76,6 @@ public class ExternalApiService {
 
     /**
      * Cria um novo usuário na API externa
-     * @throws ExternalApiException se usuário estiver banido (CORE__PREVENT_FOUND)
      */
     public ApiResponseDto createUser(String personCode) {
         String endpoint = "/partner-management/v1/users";
@@ -97,7 +96,6 @@ public class ExternalApiService {
             return ApiResponseDto.success("Usuário criado com sucesso", userUuid);
 
         } catch (ExternalApiException e) {
-            // Se for usuário banido, propaga a exceção para tratamento especial
             if (e.isBannedUser()) {
                 log.warn("Usuário {} está banido: {}", personCode, e.getMessage());
                 throw e;
@@ -109,17 +107,14 @@ public class ExternalApiService {
 
     /**
      * Adiciona um usuário (seller) a um grupo
-     * ATUALIZADO: Agora usa /sellers e envia personCode no body
      *
      * @param groupUuid UUID do grupo
      * @param personCode CPF do usuário
      */
     public ApiResponseDto addUserToGroup(String groupUuid, String personCode) {
-        // ✅ MUDANÇA: Rota mudou de /users/{userUuid} para /sellers
         String endpoint = String.format("/partner-management/v1/seller-groups/%s/sellers", groupUuid);
 
         try {
-            // ✅ MUDANÇA: Agora envia personCode no body
             AddSellerToGroupRequest request = new AddSellerToGroupRequest(personCode);
 
             log.info("Adicionando seller (personCode: {}) ao grupo {}", personCode, groupUuid);
@@ -135,9 +130,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Bloqueia um usuário
-     */
     public ApiResponseDto blockUser(String userExternalKey) {
         String endpoint = String.format("/partner-management/v1/users/%s/block", userExternalKey);
 
@@ -157,9 +149,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Desbloqueia um usuário e retorna nova senha (se gerada)
-     */
     public ApiResponseDto unblockUser(String userExternalKey) {
         String endpoint = String.format("/partner-management/v1/users/%s/unblock", userExternalKey);
 
@@ -180,9 +169,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Lista vendedores de um grupo
-     */
     public ApiResponseDto listGroupSellers(String groupUuid) {
         String endpoint = String.format("/partner-management/v1/seller-groups/%s/sellers", groupUuid);
 
@@ -200,23 +186,14 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Executa uma requisição POST
-     */
     private <T, R> ResponseEntity<R> executePost(String endpoint, T body, Class<R> responseType) {
         return execute(endpoint, HttpMethod.POST, body, responseType);
     }
 
-    /**
-     * Executa uma requisição GET
-     */
     private <R> ResponseEntity<R> executeGet(String endpoint, Class<R> responseType) {
         return execute(endpoint, HttpMethod.GET, null, responseType);
     }
 
-    /**
-     * Método genérico para executar requisições HTTP
-     */
     private <T, R> ResponseEntity<R> execute(String endpoint, HttpMethod method, T body, Class<R> responseType) {
         String url = baseUrl + endpoint;
 
@@ -236,9 +213,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Trata erros HTTP e extrai informações do corpo da resposta
-     */
     private void handleHttpError(HttpClientErrorException e) {
         try {
             Map<String, Object> errorBody = objectMapper.readValue(
@@ -270,9 +244,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Invalida token se erro for de autenticação
-     */
     private void invalidateTokenIfUnauthorized(RestClientException e) {
         String message = e.getMessage();
         if (message != null && (message.contains("401") || message.contains("403"))) {
@@ -281,9 +252,6 @@ public class ExternalApiService {
         }
     }
 
-    /**
-     * Extrai UUID da resposta
-     */
     private String extractUuid(ResponseEntity<Map> response) {
         if (response.getBody() == null) {
             throw new ExternalApiException("Resposta vazia da API");
@@ -295,9 +263,6 @@ public class ExternalApiService {
         return uuid;
     }
 
-    /**
-     * Extrai senha da resposta de unblock
-     */
     private String extractPassword(ResponseEntity<Map> response) {
         if (response.getBody() == null || !response.getBody().containsKey("newPassword")) {
             return "Usuário ativo. Clicar em esqueci minha senha.";
