@@ -151,10 +151,10 @@ public class IcredGvnUserController {
      */
     @PostMapping("/addUserToGroup")
     public ResponseEntity<ApiResponseDto> addUserToGroup(@Valid @RequestBody AddUserToGroupRequest request) {
-        log.info("Adicionando usuário {} ao grupo {}", request.getUserUuid(), request.getGroupUuid());
+        log.info("Adicionando usuário {} ao grupo {}", request.getPersonCode(), request.getGroupUuid());
         ApiResponseDto result = externalApiService.addUserToGroup(
                 request.getGroupUuid(),
-                request.getUserUuid()
+                request.getPersonCode()
         );
         return ResponseEntity.ok(result);
     }

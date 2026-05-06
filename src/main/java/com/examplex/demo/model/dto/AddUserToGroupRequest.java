@@ -10,5 +10,5 @@ public class AddUserToGroupRequest {
 
     private String groupUuid;
 
-    private String userUuid;
+    private String personCode;
 }

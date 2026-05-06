@@ -38,6 +38,7 @@ public class LoginManagementService {
     // Status constants
     private static final int STATUS_SUCCESS = -4107;
     private static final int STATUS_PENDING = -4109;
+    private static final int STATUS_ERROR   = -4108; // erro permanente, nao reprocessa
 
     // Management Type constants
     private static final int TYPE_UNBLOCK = -4105;
@@ -86,7 +87,7 @@ public class LoginManagementService {
                 break;
             } catch (Exception e) {
                 log.error("❌ ERRO CRÍTICO no item ID {}: {}", item.getId(), e.getMessage(), e);
-                updateItemStatus(item.getId(), STATUS_PENDING, "Erro crítico", null, null);
+                updateItemStatus(item.getId(), getFailureStatus(item), "Erro crítico", null, null);
                 pendingCount++;
             }
         }
@@ -116,7 +117,7 @@ public class LoginManagementService {
                 return processLinkToGroup(item);
             default:
                 log.warn("⚠️  Tipo desconhecido: {}", item.getManagementType());
-                updateItemStatus(item.getId(), STATUS_PENDING, "Tipo desconhecido", null, null);
+                updateItemStatus(item.getId(), getFailureStatus(item), "Tipo desconhecido", null, null);
                 return false;
         }
     }
@@ -124,7 +125,7 @@ public class LoginManagementService {
     private boolean processUnblockUser(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
-            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "ExternalKey vazia", null, null);
             return false;
         }
 
@@ -146,7 +147,7 @@ public class LoginManagementService {
         }
 
         log.error("❌ Falha no UNBLOCK: {}", unblockResponse.getMessage());
-        updateItemStatus(item.getId(), STATUS_PENDING,
+        updateItemStatus(item.getId(), getFailureStatus(item),
                 truncateLog(unblockResponse.getMessage()), null, null);
         return false;
     }
@@ -154,7 +155,7 @@ public class LoginManagementService {
     private boolean processResetPassword(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
-            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "ExternalKey vazia", null, null);
             return false;
         }
 
@@ -180,7 +181,7 @@ public class LoginManagementService {
 
             if (!blockResponse.isSuccess()) {
                 log.error("❌ Falha ao bloquear: {}", blockResponse.getMessage());
-                updateItemStatus(item.getId(), STATUS_PENDING,
+                updateItemStatus(item.getId(), getFailureStatus(item),
                         "Erro block: " + truncateLog(blockResponse.getMessage()), null, null);
                 return false;
             }
@@ -193,7 +194,7 @@ public class LoginManagementService {
 
             if (!unblockResponse.isSuccess()) {
                 log.error("❌ Falha ao desbloquear: {}", unblockResponse.getMessage());
-                updateItemStatus(item.getId(), STATUS_PENDING,
+                updateItemStatus(item.getId(), getFailureStatus(item),
                         "Erro unblock: " + truncateLog(unblockResponse.getMessage()), null, null);
                 return false;
             }
@@ -210,11 +211,11 @@ public class LoginManagementService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("❌ Processamento interrompido");
-            updateItemStatus(item.getId(), STATUS_PENDING, "Interrompido", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "Interrompido", null, null);
             return false;
         } catch (Exception e) {
             log.error("❌ Erro durante RESET: {}", e.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING, "Erro no reset", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "Erro no reset", null, null);
             return false;
         }
     }
@@ -226,7 +227,7 @@ public class LoginManagementService {
 
         if (!unblockResponse.isSuccess()) {
             log.error("❌ Falha ao ativar usuário: {}", unblockResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING,
+            updateItemStatus(item.getId(), getFailureStatus(item),
                     truncateLog(unblockResponse.getMessage()), null, null);
             return false;
         }
@@ -242,7 +243,7 @@ public class LoginManagementService {
     private boolean processBlockUser(LoginManagement item) {
         if (item.getExternalKey() == null || item.getExternalKey().trim().isEmpty()) {
             log.warn("⚠️  ExternalKey vazia");
-            updateItemStatus(item.getId(), STATUS_PENDING, "ExternalKey vazia", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "ExternalKey vazia", null, null);
             return false;
         }
 
@@ -256,7 +257,7 @@ public class LoginManagementService {
             return true;
         } else {
             log.error("❌ Falha: {}", response.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING, truncateLog(response.getMessage()), null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), truncateLog(response.getMessage()), null, null);
             return false;
         }
     }
@@ -271,14 +272,14 @@ public class LoginManagementService {
 
         if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
             log.warn("⚠️  UserCode (CPF) vazio");
-            updateItemStatus(item.getId(), STATUS_PENDING, "UserCode vazio", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "UserCode vazio", null, null);
             return false;
         }
 
         DadosComplementaresDto dados = parseDadosComplementares(item.getDadosComplementares());
         if (dados == null) {
             log.warn("⚠️  dadosComplementares inválido");
-            updateItemStatus(item.getId(), STATUS_PENDING, "Dados inválidos", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "Dados inválidos", null, null);
             return false;
         }
 
@@ -297,7 +298,7 @@ public class LoginManagementService {
 
         // Caso 3: Ambos vazios → Erro
         log.warn("⚠️  UUID e Nome do grupo vazios");
-        updateItemStatus(item.getId(), STATUS_PENDING, "UUID e Nome vazios", null, null);
+        updateItemStatus(item.getId(), getFailureStatus(item), "UUID e Nome vazios", null, null);
         return false;
     }
 
@@ -316,7 +317,7 @@ public class LoginManagementService {
             return true;
         } else {
             log.error("❌ Falha ao vincular: {}", response.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING,
+            updateItemStatus(item.getId(), getFailureStatus(item),
                     "Erro: " + truncateLog(response.getMessage()), null, null);
             return false;
         }
@@ -332,7 +333,7 @@ public class LoginManagementService {
         Integer pessoaId = extractPessoaIdFromGroupName(groupNome);
         if (pessoaId == null) {
             log.warn("⚠️  Não foi possível extrair pessoaId do nome: {}", groupNome);
-            updateItemStatus(item.getId(), STATUS_PENDING, "PessoaId não encontrado", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "PessoaId não encontrado", null, null);
             return false;
         }
 
@@ -342,7 +343,7 @@ public class LoginManagementService {
         String partnerExternalKey = partnerKeyRepository.findPartnerExternalKeyByPessoaId(pessoaId);
         if (partnerExternalKey == null || partnerExternalKey.trim().isEmpty()) {
             log.warn("⚠️  PartnerExternalKey não encontrado para pessoaId: {}", pessoaId);
-            updateItemStatus(item.getId(), STATUS_PENDING, "PartnerKey não encontrado", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "PartnerKey não encontrado", null, null);
             return false;
         }
 
@@ -355,7 +356,7 @@ public class LoginManagementService {
 
         if (!groupResponse.isSuccess()) {
             log.error("❌ Falha ao criar grupo: {}", groupResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING,
+            updateItemStatus(item.getId(), getFailureStatus(item),
                     "Erro ao criar grupo: " + truncateLog(groupResponse.getMessage()), null, null);
             return false;
         }
@@ -371,7 +372,7 @@ public class LoginManagementService {
 
         if (!linkResponse.isSuccess()) {
             log.warn("⚠️  Grupo criado mas falha ao vincular: {}", linkResponse.getMessage());
-            updateItemStatus(item.getId(), STATUS_PENDING,
+            updateItemStatus(item.getId(), getFailureStatus(item),
                     "Grupo criado, erro vincular", null, null);
             return false;
         }
@@ -412,7 +413,7 @@ public class LoginManagementService {
     private boolean processCreateUser(LoginManagement item) {
         if (item.getUserCode() == null || item.getUserCode().trim().isEmpty()) {
             log.warn("⚠️  UserCode vazio");
-            updateItemStatus(item.getId(), STATUS_PENDING, "UserCode vazio", null, null);
+            updateItemStatus(item.getId(), getFailureStatus(item), "UserCode vazio", null, null);
             return false;
         }
 
@@ -423,7 +424,7 @@ public class LoginManagementService {
 
             if (!createResponse.isSuccess()) {
                 log.error("❌ Falha ao criar usuário: {}", createResponse.getMessage());
-                updateItemStatus(item.getId(), STATUS_PENDING,
+                updateItemStatus(item.getId(), getFailureStatus(item),
                         truncateLog(createResponse.getMessage()), null, null);
                 return false;
             }
@@ -572,6 +573,14 @@ public class LoginManagementService {
     }
 
     // ========== MÉTODOS AUXILIARES ==========
+
+    /**
+     * -4106 falhou pela 1a vez → -4109 (tenta de novo na proxima rodada)
+     * -4109 falhou de novo    → -4108 (erro permanente, sai da fila)
+     */
+    private int getFailureStatus(LoginManagement item) {
+        return item.getManagementStatus() == STATUS_PENDING ? STATUS_ERROR : STATUS_PENDING;
+    }
 
     private String extractPassword(ApiResponseDto response) {
         if (response.getData() != null && response.getData().toString().length() > 0) {

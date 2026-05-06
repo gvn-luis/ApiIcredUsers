@@ -220,7 +220,8 @@ public class ExternalApiService {
                     Map.class
             );
 
-            Integer httpStatus = (Integer) errorBody.get("httpStatus");
+            Object statusObj = errorBody.get("httpStatus");
+            Integer httpStatus = statusObj instanceof Number ? ((Number) statusObj).intValue() : null;
             Object errorsObj = errorBody.get("errors");
 
             if (errorsObj instanceof java.util.List) {

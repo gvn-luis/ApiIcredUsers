@@ -17,7 +17,8 @@ public interface LoginManagementRepository extends JpaRepository<LoginManagement
     /**
      * Busca itens pendentes de processamento (Status: Fila, Erro, Pendência)
      */
-    @Query("SELECT lm FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4108) AND lm.registroExcluido = false")
+    @Query("SELECT lm FROM LoginManagement lm WHERE lm.managementStatus IN (-4106, -4109) AND lm.registroExcluido = false " +
+           "ORDER BY CASE lm.managementStatus WHEN -4109 THEN 0 WHEN -4106 THEN 1 ELSE 2 END ASC, lm.id ASC")
     List<LoginManagement> findPendingProcessing();
 
     /**

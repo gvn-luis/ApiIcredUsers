@@ -31,7 +31,7 @@ public class AuthTokenService {
     /**
      * Obtém um token válido, renovando se necessário
      */
-    public String getValidToken() {
+    public synchronized String getValidToken() {
         if (isTokenExpired()) {
             renewToken();
         }
@@ -79,7 +79,7 @@ public class AuthTokenService {
                 Map<String, Object> responseBody = response.getBody();
 
                 this.currentToken = (String) responseBody.get("access_token");
-                Integer expiresIn = (Integer) responseBody.get("expires_in");
+                Integer expiresIn = ((Number) responseBody.get("expires_in")).intValue();
 
                 if (this.currentToken != null && expiresIn != null) {
                     // Define o tempo de expiração baseado no expires_in
@@ -105,7 +105,7 @@ public class AuthTokenService {
     /**
      * Força a renovação do token na próxima chamada
      */
-    public void invalidateToken() {
+    public synchronized void invalidateToken() {
         log.info("Token invalidado manualmente");
         this.currentToken = null;
         this.tokenExpirationTime = 0;
