@@ -1,0 +1,11 @@
+services:
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: "${SPRING_DATASOURCE_URL:-jdbc:sqlserver://52.87.101.137:49320;databaseName=GPA_CRM;encrypt=true;trustServerCertificate=true}"
+      SPRING_DATASOURCE_USERNAME: "${SPRING_DATASOURCE_USERNAME:-bots}"
+      SPRING_DATASOURCE_PASSWORD: "${SPRING_DATASOURCE_PASSWORD:-bots2025*}"
+    restart: unless-stopped
